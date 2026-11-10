@@ -1,0 +1,79 @@
+# Build, unit tests, the auth and MCP-over-HTTP e2e, and the bridge e2e
+# against a real Engram binary, plus the Docker image build.
+#
+# Also callable from engram-update.yml with another Engram version, so a new
+# release is tested before its bump PR is opened.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      engram_version:
+        description: Engram version to test (no leading v). Defaults to engram.version.
+        type: string
+        required: false
+        default: ""
+      ref:
+        description: Git ref to check out. Defaults to the caller's ref.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Pin the Engram version under test
+        if: inputs.engram_version != ''
+        run: echo "${{ inputs.engram_version }}" > engram.version
+      - name: Fetch Engram
+        run: |
+          sh scripts/fetch-engram.sh "" "$RUNNER_TEMP/engram-bin"
+          echo "ENGRAM_BIN=$RUNNER_TEMP/engram-bin/engram" >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm test
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Pin the Engram version under test
+        if: inputs.engram_version != ''
+        run: echo "${{ inputs.engram_version }}" > engram.version
+      - name: Build the image
+        run: docker build -t engram-gateway:ci .
+      - name: Start it and check /health and the 401 challenge on /mcp
+        run: |
+          set -eu
+          docker run -d --name gw -p 3000:3000 \
+            -e AUTH_MODE=oauth \
+            -e PUBLIC_BASE_URL=http://localhost:3000 \
+            -e GITHUB_CLIENT_ID=ci-placeholder \
+            -e ALLOWED_GITHUB_LOGINS=octocat \
+            engram-gateway:ci
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:3000/health && break
+            sleep 1
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:3000/mcp \
+            -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+          test "$code" = 401
+      - name: Container logs
+        if: always()
+        run: docker logs gw || true
