@@ -1,0 +1,110 @@
+# Keep the pinned Engram release current, with a human in the loop.
+#
+# Daily, compare engram.version with Engram's latest release. When a newer
+# release exists, run the full CI against it (ci.yml via workflow_call: the
+# bridge e2e saves, searches, restarts and searches again through the real
+# binary), then open (or update) a PR that bumps the pin. The PR states the
+# test result and links the run. It is never merged automatically.
+#
+# A PR opened with GITHUB_TOKEN does not trigger other workflows, which is why
+# the tests run here, before the PR exists.
+name: engram update
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engram-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      current: ${{ steps.v.outputs.current }}
+      latest: ${{ steps.v.outputs.latest }}
+      newer: ${{ steps.v.outputs.newer }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          current=$(tr -d '[:space:]' < engram.version)
+          latest=$(gh release view -R Gentleman-Programming/engram --json tagName -q .tagName | sed 's/^v//')
+          newer=false
+          if [ "$latest" != "$current" ] && \
+             [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" = "$latest" ]; then
+            newer=true
+          fi
+          {
+            echo "current=$current"
+            echo "latest=$latest"
+            echo "newer=$newer"
+          } >> "$GITHUB_OUTPUT"
+          echo "Pinned $current, latest $latest, newer: $newer" >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    needs: check
+    if: needs.check.outputs.newer == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      engram_version: ${{ needs.check.outputs.latest }}
+
+  pr:
+    needs: [check, test]
+    # Open the PR whether the tests passed or failed: a failing release
+    # should be visible too. Only skip when there was nothing to test.
+    if: always() && needs.check.outputs.newer == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push the bump branch and open or update the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ needs.check.outputs.current }}
+          LATEST: ${{ needs.check.outputs.latest }}
+          RESULT: ${{ needs.test.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          branch="bot/engram-v$LATEST"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          echo "$LATEST" > engram.version
+          git commit -am "build(deps): bump Engram to v$LATEST"
+          git push --force origin "$branch"
+
+          if [ "$RESULT" = success ]; then
+            verdict="The full CI, including the bridge e2e against the real binary, **passed** with Engram v$LATEST."
+          else
+            verdict="The CI run against Engram v$LATEST **did not pass** (result: \`$RESULT\`). Do not merge until it is fixed."
+          fi
+          body="Bumps the pinned Engram release from v$CURRENT to v$LATEST.
+
+          $verdict
+
+          - Test run: $RUN_URL
+          - Release notes: https://github.com/Gentleman-Programming/engram/releases/tag/v$LATEST
+
+          Opened by \`.github/workflows/engram-update.yml\`. It is never merged automatically."
+
+          existing=$(gh pr list --head "$branch" --state open --json number -q '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body "$body"
+          else
+            draft=""
+            [ "$RESULT" = success ] || draft="--draft"
+            gh pr create --base main --head "$branch" $draft \
+              --title "build(deps): bump Engram to v$LATEST" --body "$body"
+          fi
