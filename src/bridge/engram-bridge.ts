@@ -12,9 +12,10 @@ export interface EngramBridgeOptions {
   /** Arguments, normally `['mcp']`. */
   args: string[];
   /**
-   * Extra environment for the child. The child inherits the parent's whole
-   * environment by default (so `ENGRAM_DATA_DIR`, cloud-sync settings, etc.
-   * pass through); these entries are layered on top.
+   * The child's whole environment (build it with `buildChildEnv`). Nothing
+   * else from the gateway's environment is passed, except the fixed set of
+   * non-secret variables the MCP SDK always adds when present (HOME, LOGNAME,
+   * PATH, SHELL, TERM, USER).
    */
   env?: Record<string, string>;
   logger: Logger;
@@ -32,18 +33,12 @@ export interface EngramBridge {
   start(): Promise<void>;
   /** Closes stdin so the child can flush and exit; escalates to a kill after a timeout. */
   close(): Promise<void>;
+  /** A child is connected or being started. */
+  live(): boolean;
 }
 
 const GATEWAY_NAME = 'engram-gateway';
 const FALLBACK_VERSION = '0.0.0';
-
-function childEnv(extra: Record<string, string> | undefined): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  return { ...env, ...(extra ?? {}) };
-}
 
 export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
   const { logger } = opts;
@@ -57,7 +52,7 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
     const transport = new StdioClientTransport({
       command: opts.command,
       args: opts.args,
-      env: childEnv(opts.env),
+      env: { ...(opts.env ?? {}) },
       stderr: 'inherit'
     });
     client.onclose = () => {
@@ -128,6 +123,9 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
       current = undefined;
       // StdioClientTransport.close(): ends stdin, waits 2s, SIGTERM, waits 2s, SIGKILL.
       await client?.close();
+    },
+    live() {
+      return current !== undefined || connecting !== undefined;
     }
   };
 }
