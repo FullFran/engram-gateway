@@ -7,11 +7,11 @@
   "license": "MIT",
   "author": "Fran (FullFran)",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.13.0"
   },
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('node:fs').cpSync('src/shared/gateway-migrations', 'dist/shared/gateway-migrations', { recursive: true })\"",
     "typecheck": "tsc --noEmit",
     "start": "node dist/main.js",
     "test:unit": "node --test test/unit/*.test.mjs",

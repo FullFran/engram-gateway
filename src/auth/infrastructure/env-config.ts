@@ -30,8 +30,10 @@ export interface AuthOnConfig {
   /** Non-fatal configuration notes to log at startup. */
   warnings: string[];
   secret: SecretProvider;
-  /** JSON file holding hashed tokens and registered clients (0600). */
-  storePath: string;
+  /** Gateway SQLite database holding hashed tokens and registered clients (0600, `GATEWAY_DB_PATH`). */
+  dbPath: string;
+  /** Pre-SQLite JSON auth store, imported once into `dbPath` when present, then renamed to `*.imported`. */
+  jsonStorePath?: string;
 }
 
 export type AuthConfig = AuthOffConfig | AuthOnConfig;
@@ -159,6 +161,7 @@ export function resolveAuthConfig(bindHost: string, env: Env, options: AuthConfi
     providers,
     warnings,
     secret,
-    storePath: join(resolve(dataDir!), 'auth-store.json')
+    dbPath: resolve(env.GATEWAY_DB_PATH?.trim() || join(resolve(dataDir!), 'gateway.db')),
+    jsonStorePath: join(resolve(dataDir!), 'auth-store.json')
   };
 }

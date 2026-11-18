@@ -48,8 +48,9 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
    | `ENGRAM_CLOUD_SERVER`, `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_AUTOSYNC` | no | Passed to `engram`, for Engram Cloud sync |
 
    State lives in the `/data` volume: `/data/engram` (Engram's database) and
-   `/data/gateway` (clients, tokens and the session-signing secret, which is
-   generated on first start with mode 0600).
+   `/data/gateway` (the gateway database `gateway.db` with clients and hashed
+   tokens, and the session-signing secret, which is generated on first start;
+   both mode 0600).
 3. Add `https://<your-host>/mcp` as a remote MCP server in your client and
    sign in with GitHub when asked.
 
@@ -64,8 +65,28 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
 | `ENGRAM_ARGS` | `mcp` | Arguments for the child, e.g. `mcp --tools=agent` |
 | `ENGRAM_DATA_DIR` | Engram's default | Engram's data directory |
 | `GATEWAY_DATA_DIR` | required when auth is on | Auth state directory (the image sets `/data/gateway`) |
+| `GATEWAY_DB_PATH` | `$GATEWAY_DATA_DIR/gateway.db` | Gateway SQLite database; keep it on the persistent volume, never inside a brain's data directory |
 | `AUTH_ACCESS_TOKEN_TTL_SECONDS`, `AUTH_REFRESH_TOKEN_TTL_SECONDS`, `AUTH_SESSION_TTL_SECONDS` | 1 h, 30 d, 7 d | Token and sign-in session lifetimes |
 | `GITHUB_CLIENT_SECRET` / `GITHUB_CLIENT_SECRET_FILE` | unset | Only for the web (redirect) flow instead of device flow |
+
+### Gateway database
+
+Gateway state (OAuth clients, token families, hashed tokens and codes, plus
+the users, brains and grants tables later features fill) is one SQLite file
+opened with Node's built-in `node:sqlite` (Node 22.13 or later; the image
+ships Node 24), in WAL mode with foreign keys on and a 5 s busy timeout, so
+two gateways can share it during a deploy. The schema is versioned with
+`PRAGMA user_version`; the ordered files in `src/shared/gateway-migrations/`
+are applied on start, each in one transaction. A database newer than the
+running gateway is refused.
+
+Upgrading from the JSON store: on the first start with an empty database, an
+existing `$GATEWAY_DATA_DIR/auth-store.json` is imported in one transaction
+and renamed to `auth-store.json.imported` (never deleted; remove it yourself
+once you are happy). Issued tokens keep working. The import runs once; a
+database that already holds auth state is never overwritten. Stop the old
+gateway before starting the new one for this upgrade: tokens an old gateway
+issues after the import are not carried over (clients just sign in again).
 
 ## Develop
 

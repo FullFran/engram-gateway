@@ -69,9 +69,13 @@ test('AUTH_PROVIDERS: github by default, unknown ids refused by name', () => {
     error => error instanceof AuthConfigError && /unknown provider "ldap"/.test(error.message));
 });
 
-test('GATEWAY_DATA_DIR holds the auth store and is required when auth is on', () => {
+test('GATEWAY_DATA_DIR holds the gateway database (unless GATEWAY_DB_PATH) and is required when auth is on', () => {
   const config = resolveAuthConfig('0.0.0.0', fullEnv(), { resourcePaths: ['/mcp'] });
-  assert.equal(config.storePath, join(dataDir, 'auth-store.json'));
+  assert.equal(config.dbPath, join(dataDir, 'gateway.db'));
+  assert.equal(config.jsonStorePath, join(dataDir, 'auth-store.json'), 'the JSON store is only the import source');
+  const custom = resolveAuthConfig('0.0.0.0', { ...fullEnv(), GATEWAY_DB_PATH: ' /srv/state/gw.db ' }, { resourcePaths: ['/mcp'] });
+  assert.equal(custom.dbPath, '/srv/state/gw.db');
+  assert.equal(custom.jsonStorePath, join(dataDir, 'auth-store.json'));
   const { GATEWAY_DATA_DIR, ...withoutDir } = fullEnv();
   assert.throws(() => resolveAuthConfig('0.0.0.0', withoutDir, { resourcePaths: ['/mcp'] }),
     error => error instanceof AuthConfigError && /GATEWAY_DATA_DIR/.test(error.message));
