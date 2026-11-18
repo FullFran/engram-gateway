@@ -10,8 +10,10 @@
  * secret values in `meta`.
  *
  * This module knows nothing about the MCP SDK, the HTTP layer or auth.
+ * Defaults: redaction (#9) on, memory text wrapped as data (#19).
  */
 import { createRedactStage } from './redact.js';
+import { createWrapStage } from './wrap-data.js';
 
 export interface ToolCallRequest {
   name: string;
@@ -52,7 +54,7 @@ export interface ToolCallPipelineOptions extends Partial<ToolCallPipeline> {
 export const allowAll: RequestStage = ctx => ctx;
 /** Placeholder until #8 adds the append-only audit log. */
 export const noAudit: ResultStage = (_ctx, result) => result;
-/** Identity result stage. */
+/** Identity result stage (e.g. to turn wrapping off in tests). */
 export const passResult: ResultStage = (_ctx, result) => result;
 
 export function createToolCallPipeline(opts: ToolCallPipelineOptions = {}): ToolCallPipeline {
@@ -60,7 +62,7 @@ export function createToolCallPipeline(opts: ToolCallPipelineOptions = {}): Tool
     authorize: opts.authorize ?? allowAll,
     redact: opts.redact ?? createRedactStage({ enabled: opts.redactSecrets ?? true }),
     audit: opts.audit ?? noAudit,
-    wrap: opts.wrap ?? passResult
+    wrap: opts.wrap ?? createWrapStage()
   };
 }
 
