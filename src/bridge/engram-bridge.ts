@@ -3,6 +3,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { Server } from '@modelcontextprotocol/server';
 import type { McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
+import { createToolCallPipeline, runToolCall } from '../pipeline/index.js';
+import type { ToolCallPipeline, ToolCallResult } from '../pipeline/index.js';
 
 export interface EngramBridgeOptions {
   /** Executable to spawn, normally `engram`. */
@@ -16,6 +18,11 @@ export interface EngramBridgeOptions {
    */
   env?: Record<string, string>;
   logger: Logger;
+  /**
+   * Stages every `tools/call` runs through (authorize -> redact -> forward ->
+   * audit -> wrap). Defaults to `createToolCallPipeline()`: secret redaction on.
+   */
+  pipeline?: ToolCallPipeline;
 }
 
 export interface EngramBridge {
@@ -40,6 +47,7 @@ function childEnv(extra: Record<string, string> | undefined): Record<string, str
 
 export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
   const { logger } = opts;
+  const pipeline = opts.pipeline ?? createToolCallPipeline();
   let current: Client | undefined;
   let connecting: Promise<Client> | undefined;
   let closed = false;
@@ -100,7 +108,10 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
     server.setRequestHandler('tools/list', async request => (await upstream()).listTools(request.params));
     server.setRequestHandler('tools/call', async request => {
       const { name, arguments: args } = request.params;
-      return (await upstream()).callTool({ name, ...(args !== undefined ? { arguments: args } : {}) });
+      const result = await runToolCall(pipeline, { name, ...(args !== undefined ? { arguments: args } : {}) }, async call =>
+        (await (await upstream()).callTool(call)) as ToolCallResult
+      );
+      return result as Awaited<ReturnType<Client['callTool']>>;
     });
     return server;
   };

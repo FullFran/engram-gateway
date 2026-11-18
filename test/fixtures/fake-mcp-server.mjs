@@ -1,5 +1,6 @@
 // Tiny stdio MCP server used by the bridge unit tests.
-// Tools: echo (ok), fail (isError), crash (exits the process), slow (never answers).
+// Tools: echo (ok), fail (isError), crash (exits the process), slow (never answers),
+// mem_save (returns the arguments it received, so tests can see what reached the server).
 import { writeFileSync } from 'node:fs';
 import { TOOLS } from './fake-tools.mjs';
 import { Server } from '@modelcontextprotocol/server';
@@ -16,6 +17,7 @@ const factory = () => {
     if (name === 'echo') return { content: [{ type: 'text', text: args.text }], structuredContent: { echoed: args.text } };
     if (name === 'fail') return { content: [{ type: 'text', text: 'boom' }], isError: true };
     if (name === 'crash') process.exit(3);
+    if (name === 'mem_save') return { content: [{ type: 'text', text: JSON.stringify(args) }], structuredContent: { received: args } };
     if (name === 'slow') return new Promise(() => {});
     return { content: [{ type: 'text', text: `unknown tool ${name}` }], isError: true };
   });

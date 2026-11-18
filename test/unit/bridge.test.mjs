@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { createEngramBridge } from '../../dist/bridge/index.js';
+import { createToolCallPipeline } from '../../dist/pipeline/index.js';
 import { TOOLS } from '../fixtures/fake-tools.mjs';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/fake-mcp-server.mjs', import.meta.url));
@@ -119,4 +120,85 @@ test('close() ends the child process', async (t) => {
   process.kill(pid, 0);
   await bridge.close();
   assert.throws(() => process.kill(pid, 0), /ESRCH/);
+});
+
+const fakeToken = () => 'gh' + 'p_' + 'aB3dE5gH7jK9mN1pQ2'.repeat(2);
+
+test('mem_save content with a GitHub token reaches the server redacted and is never logged', async () => {
+  const token = fakeToken();
+  const before = logs.length;
+  const bridge = newBridge();
+  await bridge.start();
+  try {
+    const { client } = await connectDownstream(bridge);
+    const res = await client.callTool({ name: 'mem_save', arguments: { title: 'creds', content: `use ${token} for CI` } });
+    assert.deepEqual(res.structuredContent, { received: { title: 'creds', content: 'use [secret removed:github] for CI' } });
+    assert.ok(!JSON.stringify(logs.slice(before)).includes(token), 'secret not logged');
+    await client.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('non-write tools still forward their arguments verbatim', async () => {
+  const token = fakeToken();
+  const bridge = newBridge();
+  await bridge.start();
+  try {
+    const { client } = await connectDownstream(bridge);
+    const res = await client.callTool({ name: 'echo', arguments: { text: token } });
+    assert.deepEqual(res.structuredContent, { echoed: token });
+    await client.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('redaction can be turned off through the bridge pipeline option', async () => {
+  const token = fakeToken();
+  const bridge = createEngramBridge({
+    command: process.execPath,
+    args: [FIXTURE],
+    logger,
+    pipeline: createToolCallPipeline({ redactSecrets: false })
+  });
+  await bridge.start();
+  try {
+    const { client } = await connectDownstream(bridge);
+    const res = await client.callTool({ name: 'mem_save', arguments: { content: token } });
+    assert.deepEqual(res.structuredContent, { received: { content: token } });
+    await client.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('tool calls run authorize -> redact -> forward -> audit -> wrap, and audit sees redaction counts', async () => {
+  const order = [];
+  let auditMeta;
+  const bridge = createEngramBridge({
+    command: process.execPath,
+    args: [FIXTURE],
+    logger,
+    pipeline: createToolCallPipeline({
+      authorize: ctx => (order.push('authorize'), ctx),
+      audit: (ctx, result) => {
+        order.push(`audit:${result.structuredContent.received.content}`);
+        auditMeta = ctx.meta;
+        return result;
+      },
+      wrap: (ctx, result) => (order.push('wrap'), { ...result, content: [{ type: 'text', text: 'wrapped' }] })
+    })
+  });
+  await bridge.start();
+  try {
+    const { client } = await connectDownstream(bridge);
+    const res = await client.callTool({ name: 'mem_save', arguments: { content: fakeToken() } });
+    assert.deepEqual(order, ['authorize', 'audit:[secret removed:github]', 'wrap']);
+    assert.deepEqual(auditMeta, { redactions: { github: 1 } });
+    assert.deepEqual(res.content, [{ type: 'text', text: 'wrapped' }]);
+    await client.close();
+  } finally {
+    await bridge.close();
+  }
 });

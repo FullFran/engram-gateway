@@ -20,6 +20,19 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
   verbatim (schemas, `isError`, `structuredContent`). If the child dies, the
   next request restarts it. Both the 2026-07-28 protocol and the legacy
   `initialize` handshake are served.
+- **Tool-call pipeline.** Every `tools/call` runs through the same stages,
+  in order: authorize → redact → forward to Engram → audit → wrap result.
+  Authorize and audit are pass-through placeholders for now (roles and
+  grants, audit log).
+- **Secret redaction.** Before `mem_save`, `mem_update`,
+  `mem_session_summary`, `mem_save_prompt` and `mem_capture_passive` are
+  forwarded, every string argument is scanned for well-known secret shapes
+  (Anthropic, OpenAI, GitHub, AWS, Stripe, JWT, PEM private keys, passwords
+  in URLs) and each match becomes `[secret removed:<kind>]`. Only per-kind
+  counts are kept for the audit step; the secret is never stored or logged.
+  There are no entropy heuristics, so git SHAs and UUIDs survive. Redaction
+  is on by default and has no environment switch; text stored before this
+  feature is not rewritten.
 - **Auth.** A built-in OAuth 2.1 authorization server: protected resource
   metadata (RFC 9728), dynamic client registration, client ID metadata
   documents, PKCE, rotating refresh tokens. People sign in with GitHub's
