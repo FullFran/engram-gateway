@@ -83,3 +83,16 @@ test('brains: domain is pure; brains never import http, auth or the bridge (main
     }
   }
 });
+
+test('audit: domain is pure, application uses only its domain and ports, and audit imports no other context', () => {
+  const dir = join(src, 'audit');
+  for (const file of files(dir)) {
+    const rel = relative(src, file);
+    for (const spec of imports(file)) {
+      const to = target(file, spec);
+      if (rel.startsWith('audit/domain/')) assert.ok(to.startsWith('audit/domain/'), `${rel} imports ${spec}`);
+      if (rel.startsWith('audit/application/')) assert.ok(to.startsWith('audit/domain/') || to.startsWith('audit/application/'), `${rel} imports ${spec}`);
+      for (const other of ['auth/', 'http/', 'bridge/', 'pipeline/']) assert.ok(!to.startsWith(other), `${rel} imports ${spec}`);
+    }
+  }
+});

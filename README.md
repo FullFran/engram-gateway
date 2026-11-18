@@ -214,6 +214,34 @@ database that already holds auth state is never overwritten. Stop the old
 gateway before starting the new one for this upgrade: tokens an old gateway
 issues after the import are not carried over (clients just sign in again).
 
+### Audit log
+
+The gateway database holds an append-only `audit_log` table (`src/audit/`):
+one row per tool call (and, later, per admin action) with when, who, which
+brain, the action and its target (the tool name), the outcome (`ok`, `error`
+or `denied`) and the duration. It never stores memory content, argument
+values, error messages or secrets: `meta_json` keeps counts and ids only
+(for example redaction counts per kind, the observation id, the OAuth client
+id, and a fixed `errorKind` such as `forward_failed`).
+
+- **Append-only in the database.** `BEFORE UPDATE` and `BEFORE DELETE`
+  triggers abort with `audit_log is append-only`.
+- **Opaque actors.** A user is stored by `users.id`; the GitHub login lives in
+  `users` and is joined in when reading. Append-only conflicts with "erase
+  everything about user X": anonymise a user by editing `users`, not the log.
+- **Brain.** `brain_id` is an opaque text key (the brain slug), empty when a
+  call is not tied to a brain.
+- **Consistency.** A tool call cannot share a transaction with the brain's
+  own `engram.db`, so its row is written after the forward, with the outcome.
+  A crash between the forward and that write loses the row; this is accepted
+  rather than a two-phase write. Admin mutations write their row in the same
+  transaction (`insertAuditEvent`).
+- **CSV export.** `auditCsvLines(log.read({ brain, fromMs, toMs }))` streams
+  the log oldest first (read in pages, never all at once) as RFC 4180 CSV.
+  Cells that start with `=`, `+`, `-`, `@`, tab or CR get a `'` prefix so a
+  spreadsheet does not run them as formulas. The admin-only HTTP endpoint
+  comes with roles.
+
 ## Develop
 
 ```sh
