@@ -10,7 +10,9 @@ import type { AccessPolicy } from './application/identity.js';
 import type { AuthSettings } from './application/settings.js';
 import type { Logger } from './application/ports.js';
 import type { AuthOnConfig } from './infrastructure/env-config.js';
-import { JsonFileTokenStore } from './infrastructure/json-token-store.js';
+import { SqliteTokenStore } from './infrastructure/sqlite-token-store.js';
+import { importJsonTokenStore } from './infrastructure/json-store-import.js';
+import { openGatewayDatabase } from '../shared/gateway-database.js';
 import { HmacTicketSigner, cryptoRandom, sha256Hasher, systemClock } from './infrastructure/node-crypto.js';
 import type { SafeFetchOptions } from './infrastructure/ssrf-fetch.js';
 import { CookieJar, isSameOrigin } from './presentation/http/http-helpers.js';
@@ -59,10 +61,16 @@ export function buildAuth(config: AuthOnConfig, deps: AuthDeps): AuthModule {
   const random = cryptoRandom;
   const cookies = new CookieJar(config.secureCookies);
   const policy = deps.policy ?? new StaticAccessPolicy(settings);
+  const db = openGatewayDatabase(config.dbPath);
+  if (config.jsonStorePath) {
+    const imported = importJsonTokenStore(db, config.jsonStorePath);
+    if (imported.status === 'imported') deps.logger.info('Imported the JSON auth store into the gateway database', { from: config.jsonStorePath, movedTo: imported.renamedTo, ...imported.counts });
+    else if (imported.status === 'skipped-not-empty') deps.logger.warn(`Not importing ${config.jsonStorePath}: the gateway database already holds auth state. The file is left in place.`);
+  }
   const context: AuthPluginContext = {
     settings,
     signer: new HmacTicketSigner(config.secret.secret(), clock),
-    store: new JsonFileTokenStore(config.storePath, clock, random),
+    store: new SqliteTokenStore(db, clock, random),
     cookies, clock, random, hasher: sha256Hasher, logger: deps.logger, policy,
     ...(deps.cimdFetch ? { fetchOptions: deps.cimdFetch } : {}),
     resourceName: deps.resourceName ?? 'Engram memory'

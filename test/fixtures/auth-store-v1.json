@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "clients": {
+    "client-1": { "clientId": "client-1", "clientName": "Claude", "redirectUris": ["http://127.0.0.1:33418/callback"], "authMethod": "none", "createdAt": 1800000000 }
+  },
+  "accessTokens": {
+    "6f1ed002ab5595859014ebf0951522d9e48c7a3e0c4c8b6c7b5c7b2b4b8f0a11": { "clientId": "client-1", "login": "FullFran", "scope": "memory", "resource": "https://memory.example.com/mcp", "expiresAt": 4102444800, "familyId": "fam-live" }
+  },
+  "refreshTokens": {
+    "aa11bb22cc33dd44ee55ff6600112233445566778899aabbccddeeff00112233": { "clientId": "client-1", "login": "FullFran", "scope": "memory", "resource": "https://memory.example.com/mcp", "expiresAt": 4102444800, "familyId": "fam-live" },
+    "bb11bb22cc33dd44ee55ff6600112233445566778899aabbccddeeff00112233": { "clientId": "client-1", "login": "FullFran", "scope": "memory", "resource": "https://memory.example.com/mcp", "expiresAt": 4102444800, "familyId": "fam-live", "usedAt": 1800000100 }
+  },
+  "families": {
+    "fam-live": { "expiresAt": 4102444800 },
+    "fam-revoked": { "expiresAt": 4102444800, "revokedAt": 1800000200 }
+  },
+  "codes": {
+    "c0de": { "clientId": "client-1", "redirectUri": "http://127.0.0.1:33418/callback", "codeChallenge": "x", "scope": "memory", "resource": "https://memory.example.com/mcp", "login": "FullFran", "expiresAt": 4102444800, "used": true, "familyId": "fam-live" }
+  },
+  "usedOnce": { "ticket-1": 4102444800 },
+  "deviceLogins": {
+    "nonce-1": { "userCode": "ABCD-1234", "verificationUri": "https://github.com/login/device", "expiresAt": 4102444800000, "intervalMs": 5000, "nextPollAt": 1800000005000, "returnTo": "/" }
+  }
+}

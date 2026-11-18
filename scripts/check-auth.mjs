@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, '..');
@@ -65,6 +66,17 @@ function assertEqual(actual, expected, message) {
 function ok(label) {
   passed += 1;
   console.log(`  ok - ${label}`);
+}
+
+/** Every value stored in the gateway database, as text (WAL included: SQLite reads it). */
+function dumpGatewayDb(path) {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all().map(row => row.name);
+    return tables.map(table => JSON.stringify(db.prepare(`SELECT * FROM "${table}"`).all())).join('\n');
+  } finally {
+    db.close();
+  }
 }
 
 function freePort() {
@@ -752,15 +764,16 @@ async function checkRealServerFlow(github) {
     ok('/mcp needs a bearer (no cookie, no bad token) and serves the engram tools');
 
     // --- store holds hashes only ---
-    const storePath = join(dataDir, 'auth-store.json');
-    const stored = readFileSync(storePath, 'utf8');
+    const storePath = join(dataDir, 'gateway.db');
+    const stored = dumpGatewayDb(storePath);
     for (const token of issued) assert(!stored.includes(token), 'raw token found in the auth store');
     // Revoked access tokens are deleted; the live pair must be there, hashed.
     for (const token of [apiTokens.access_token, apiTokens.refresh_token]) {
       assert(stored.includes(createHash('sha256').update(token).digest('hex')), 'live token hash present in the store');
     }
-    assertEqual(statSync(storePath).mode & 0o777, 0o600, 'auth store file mode');
-    ok('auth store holds only SHA-256 hashes, mode 0600');
+    assertEqual(statSync(storePath).mode & 0o777, 0o600, 'gateway database file mode');
+    assert(!existsSync(join(dataDir, 'auth-store.json')), 'no JSON auth store is written any more');
+    ok('gateway database holds only SHA-256 hashes, mode 0600');
 
     // --- oversized bodies are a client error, not a server error ---
     const oversized = await request(base, { method: 'POST', path: '/oauth/register', json: { client_name: 'x'.repeat(20000), redirect_uris: [redirectUri] } });
@@ -793,7 +806,7 @@ async function checkRealServerFlow(github) {
   // After the process exited, its output is complete.
   const log = gateway.output();
   assert(!log.includes('Unhandled error'), `a 413 is not logged as an unhandled error: ${log.slice(-600)}`);
-  const stored = readFileSync(join(dataDir, 'auth-store.json'), 'utf8');
+  const stored = dumpGatewayDb(join(dataDir, 'gateway.db'));
   const seen = transcript.join('\n');
   assert(github.secrets.accessTokens.length > 0 && github.secrets.deviceCodes.length > 0, 'the fake GitHub issued tokens');
   for (const secret of [...github.secrets.accessTokens, ...github.secrets.deviceCodes]) {
@@ -1147,7 +1160,7 @@ async function checkInProcess(github) {
     github: { clientId: GH_CLIENT_ID, oauthBaseUrl: github.url, apiBaseUrl: github.url, appName: GH_APP_NAME },
     warnings: [],
     secret: { secret: () => Buffer.from(AUTH_SECRET) },
-    storePath: join(storeDir, 'auth-store.json')
+    dbPath: join(storeDir, 'gateway.db')
   });
   // Injected for tests only: allow the loopback CIMD host and trust its
   // self-signed certificate. https-only and the size/time limits still apply.
@@ -1233,6 +1246,45 @@ async function checkInProcess(github) {
   }
 }
 
+/** Upgrade from the JSON auth store: a token issued before the upgrade keeps working, the file is moved aside once. */
+async function checkJsonStoreUpgrade(github) {
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const dataDir = join(scratch, `upgrade-${port}`);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const raw = randomBytes(32).toString('base64url');
+  const hash = createHash('sha256').update(raw).digest('hex');
+  const far = Math.floor(Date.now() / 1000) + 3600;
+  const jsonPath = join(dataDir, 'auth-store.json');
+  const legacy = JSON.stringify({
+    version: 1,
+    clients: {},
+    accessTokens: { [hash]: { clientId: 'legacy-client', login: ALLOWED_LOGIN, scope: 'memory', resource: `${base}/mcp`, expiresAt: far, familyId: 'legacy-family' } },
+    refreshTokens: {},
+    families: { 'legacy-family': { expiresAt: far } }
+  });
+  writeFileSync(jsonPath, legacy, { mode: 0o600 });
+  const env = authEnv(port, github.url, dataDir, { LOG_LEVEL: 'info' });
+  for (const round of ['first start', 'restart']) {
+    const gateway = spawnGateway(port, env);
+    try {
+      await waitForHealth(base, gateway);
+      const tools = jsonRpcResult(await mcpToolsList(base, raw), 1).tools.map(tool => tool.name);
+      assert(tools.includes('mem_search'), `${round}: a token issued before the upgrade still opens /mcp`);
+      assert(!existsSync(jsonPath), `${round}: auth-store.json moved aside`);
+      assertEqual(readFileSync(`${jsonPath}.imported`, 'utf8'), legacy, `${round}: the JSON store is kept, unchanged, as auth-store.json.imported`);
+      assert(!existsSync(`${jsonPath}.imported.1`), `${round}: imported only once`);
+      if (round === 'first start') assert(/Imported the JSON auth store/.test(gateway.output()), 'the import is logged');
+    } catch (error) {
+      error.message += `\n--- gateway output ---\n${gateway.output()}`;
+      throw error;
+    } finally {
+      await stop(gateway);
+    }
+  }
+  ok('upgrade: tokens from auth-store.json keep working, the file is imported once and kept as auth-store.json.imported');
+}
+
 // ---------------------------------------------------------------------------
 
 const github = await startFakeGitHub();
@@ -1242,6 +1294,7 @@ try {
   await checkStartupRules();
   await checkRealServerFlow(github);
   await checkGeneratedSecret(github);
+  await checkJsonStoreUpgrade(github);
   await checkInProcess(github);
   console.log(`Auth check passed: ${passed} groups.`);
 } catch (error) {

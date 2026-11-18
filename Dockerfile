@@ -35,8 +35,9 @@ RUN npm run build && npm prune --omit=dev && npm cache clean --force
 
 # ---- runtime: alpine + Node from the alpine repo (no npm at runtime) ----
 FROM alpine:3.23 AS runtime
+# The gateway database uses the built-in node:sqlite (unflagged since Node 22.13).
 RUN apk add --no-cache nodejs && \
-    node -e "if (parseInt(process.versions.node, 10) < 20) { console.error('node ' + process.versions.node + ' < 20'); process.exit(1); }"
+    node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 13)) { console.error('node ' + process.versions.node + ' < 22.13'); process.exit(1); } require('node:sqlite');"
 RUN addgroup -S -g 1001 engram && \
     adduser -S -u 1001 -G engram -h /home/engram engram && \
     mkdir -p /home/engram /app /data/gateway /data/engram && \
@@ -44,8 +45,8 @@ RUN addgroup -S -g 1001 engram && \
 ENV HOME=/home/engram
 WORKDIR /app
 USER engram
-# Durable state: the gateway's auth store and generated signing secret
-# (/data/gateway, mode 0600) and Engram's database (/data/engram).
+# Durable state: the gateway database (gateway.db) and generated signing
+# secret (/data/gateway, mode 0600) and Engram's database (/data/engram).
 VOLUME ["/data"]
 
 COPY --from=engram /usr/local/bin/engram /usr/local/bin/engram
@@ -55,6 +56,8 @@ COPY --chown=engram:engram --from=build /app/dist ./dist
 
 # Build-time smoke tests: a broken assumption fails the build, not production.
 RUN node --input-type=module -e "await import('@modelcontextprotocol/server'); await import('@modelcontextprotocol/client/stdio'); console.log('smoke: MCP SDK OK')" && \
+    node --input-type=module -e "const { openGatewayDatabase } = await import('/app/dist/shared/gateway-database.js'); openGatewayDatabase('/tmp/smoke/gateway.db').close(); console.log('smoke: gateway database OK')" && \
+    rm -rf /tmp/smoke && \
     node --check dist/main.js && \
     engram version
 
