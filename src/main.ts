@@ -11,12 +11,14 @@
 import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
+import { SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createEngramBridge } from './bridge/index.js';
 import { resolveGatewayConfig } from './config.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
 import { createGatewayApp } from './http/app.js';
+import { createAuditStage, createToolCallPipeline } from './pipeline/index.js';
 import { openGatewayDatabase } from './shared/gateway-database.js';
 import { createLogger } from './shared/logger.js';
 
@@ -63,13 +65,23 @@ async function main(): Promise<void> {
   const auth = authConfig.mode === 'oauth' ? buildAuth(authConfig, { logger, db }) : undefined;
   await auth?.warmUp();
 
+  // Audit log (#8): every tool call gets one row in the gateway database,
+  // with the brain it was routed to; without auth the actor is `anonymous`.
+  const auditLog = new SqliteAuditLog(db);
+  const pipeline = createToolCallPipeline({
+    audit: createAuditStage({
+      record: toolCallRecorder(auditLog, { nowMs: () => Date.now() }),
+      onError: (error, tool) => logger.error('Audit log write failed; the tool call went through unrecorded', { tool, reason: (error as Error).message })
+    })
+  });
+
   const command = process.env.ENGRAM_BIN?.trim() || 'engram';
   const args = (process.env.ENGRAM_ARGS?.trim() || 'mcp').split(/\s+/);
   const registry = new BrainRegistry({
     brains: new Map(brains.map(brain => [brain.slug, brain])),
     createProcess: brain => {
       mkdirSync(brain.dataDir, { recursive: true, mode: 0o700 });
-      return createEngramBridge({ command, args, env: buildChildEnv(brain, process.env), logger, brain: brain.slug });
+      return createEngramBridge({ command, args, pipeline, env: buildChildEnv(brain, process.env), logger, brain: brain.slug });
     },
     clock: { now: () => Date.now() },
     idleTimeoutMs: brainsConfig.idleTimeoutMs,

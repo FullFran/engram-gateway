@@ -33,3 +33,31 @@ export function recordToolCall(log: AuditLog, clock: AuditClock, call: ToolCallA
     meta
   });
 }
+
+/** A finished tool call as the pipeline's audit stage describes it (structurally; audit does not import the pipeline). */
+export interface ToolCallFacts {
+  caller?: { login?: string; clientId?: string };
+  brain: string | null;
+  tool: string;
+  startedAtMs: number;
+  outcome: AuditOutcome;
+  errorKind?: AuditErrorKind;
+  meta: Record<string, unknown>;
+}
+
+/** The system actor for calls without a signed-in user (auth turned off). */
+export const ANONYMOUS_ACTOR: AuditActor = { kind: 'system', id: 'anonymous' };
+
+/** Turns pipeline facts into audit rows: a signed-in caller is a user actor, anyone else the anonymous actor. */
+export function toolCallRecorder(log: AuditLog, clock: AuditClock): (facts: ToolCallFacts) => number {
+  return facts => {
+    const login = facts.caller?.login;
+    const actor: AuditActor = login
+      ? { kind: 'user', login, ...(facts.caller?.clientId !== undefined ? { clientId: facts.caller.clientId } : {}) }
+      : ANONYMOUS_ACTOR;
+    return recordToolCall(log, clock, {
+      actor, brain: facts.brain, tool: facts.tool, startedAtMs: facts.startedAtMs, outcome: facts.outcome,
+      ...(facts.errorKind ? { errorKind: facts.errorKind } : {}), meta: facts.meta
+    });
+  };
+}

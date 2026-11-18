@@ -232,10 +232,9 @@ test('tool calls run authorize -> redact -> forward -> audit -> wrap, and audit 
     logger,
     pipeline: createToolCallPipeline({
       authorize: ctx => (order.push('authorize'), ctx),
-      audit: (ctx, result) => {
-        order.push(`audit:${result.structuredContent.received.content}`); // before wrap: raw
+      audit: (ctx, outcome) => {
+        order.push(`audit:${outcome.result.structuredContent.received.content}`); // before wrap: raw
         auditMeta = ctx.meta;
-        return result;
       },
       wrap: (ctx, result) => (order.push('wrap'), { ...result, content: [{ type: 'text', text: 'wrapped' }] })
     })
