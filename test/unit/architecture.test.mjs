@@ -64,10 +64,11 @@ test('only the bridge knows the MCP client package', () => {
   }
 });
 
-test('the tool-call pipeline imports only itself (no SDK, auth, http or bridge)', () => {
+test('the tool-call pipeline imports only itself and Node built-ins (no SDK, auth, http or bridge)', () => {
   for (const file of files(join(src, 'pipeline'))) {
     for (const spec of imports(file)) {
-      assert.ok(target(file, spec).startsWith('pipeline/'), `${relative(src, file)} imports ${spec}`);
+      const to = target(file, spec);
+      assert.ok(to.startsWith('pipeline/') || to.startsWith('node:'), `${relative(src, file)} imports ${spec}`);
     }
   }
 });
