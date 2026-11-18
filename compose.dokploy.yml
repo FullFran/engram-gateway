@@ -12,8 +12,12 @@
 #   ALLOWED_GITHUB_LOGINS comma-separated GitHub logins, e.g. octocat
 #   GITHUB_APP_NAME       optional, the OAuth App's name shown on sign-in
 #
-# Optional, passed through to the engram child (e.g. Engram Cloud sync):
-#   ENGRAM_CLOUD_SERVER, ENGRAM_CLOUD_TOKEN, ENGRAM_CLOUD_AUTOSYNC, ENGRAM_PROJECT
+# Optional:
+#   BRAINS                extra brains served at /mcp/<brain>, e.g. work,notes
+#   ENGRAM_PROJECT        default Engram project, passed to every brain
+#   ENGRAM_CLOUD_SERVER, ENGRAM_CLOUD_TOKEN, ENGRAM_CLOUD_AUTOSYNC
+#                         Engram Cloud sync, passed only to the brains listed in
+#   ENGRAM_CLOUD_BRAINS   e.g. default (to keep syncing the pre-brains memory)
 
 services:
   engram-gateway:
@@ -32,6 +36,9 @@ services:
       ALLOWED_GITHUB_LOGINS: ${ALLOWED_GITHUB_LOGINS:?set ALLOWED_GITHUB_LOGINS}
       GATEWAY_DATA_DIR: /data/gateway
       ENGRAM_DATA_DIR: /data/engram
+      BRAINS_ROOT: /data/brains
+      BRAINS: ${BRAINS:-}
+      ENGRAM_CLOUD_BRAINS: ${ENGRAM_CLOUD_BRAINS:-}
       ENGRAM_PROJECT: ${ENGRAM_PROJECT:-}
       ENGRAM_CLOUD_SERVER: ${ENGRAM_CLOUD_SERVER:-}
       ENGRAM_CLOUD_TOKEN: ${ENGRAM_CLOUD_TOKEN:-}
