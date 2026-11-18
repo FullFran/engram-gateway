@@ -4,7 +4,7 @@
 //
 // Flow: start the bridge, list tools, mem_save a unique observation, mem_search
 // finds it, close, start a NEW bridge on the same data dir, mem_search still
-// finds it. Requests go through the real `createMcpHandler` (web Request in,
+// finds it; a mem_save carrying a fake GitHub token is stored redacted (#9). Requests go through the real `createMcpHandler` (web Request in,
 // web Response out) with a Streamable HTTP client whose fetch is the handler.
 //
 // Tool profile: `engram mcp` with no flags serves the `all` profile (27 tools),
@@ -103,6 +103,21 @@ await withBridge(async client => {
 await withBridge(async client => {
   const found = await client.callTool({ name: 'mem_search', arguments: { query: marker } });
   assert.ok(text(found).includes(marker), 'observation survives a bridge restart');
+});
+
+// Secret redaction (#9): a fake GitHub token saved through the bridge is stored redacted.
+const fakeToken = 'gh' + 'p_' + 'aB3dE5gH7jK9mN1pQ2'.repeat(2);
+const secretMarker = `${marker}-secret`;
+await withBridge(async client => {
+  const saved = await client.callTool({
+    name: 'mem_save',
+    arguments: { title: `Secret check ${secretMarker}`, content: `CI token ${fakeToken} for ${secretMarker}`, type: 'discovery' }
+  });
+  assert.ok(!saved.isError, `mem_save failed: ${text(saved)}`);
+  const found = await client.callTool({ name: 'mem_search', arguments: { query: secretMarker } });
+  assert.ok(text(found).includes(secretMarker), 'redacted observation is found');
+  assert.ok(text(found).includes('[secret removed:github]'), 'stored text carries the redaction marker');
+  assert.ok(!text(found).includes(fakeToken), 'the token was not stored');
 });
 
 // Same bridge, downstream client negotiating the 2026-07-28 protocol.
