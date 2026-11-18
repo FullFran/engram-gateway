@@ -140,14 +140,16 @@ test('mem_save content with a GitHub token reaches the server redacted and is ne
   }
 });
 
-test('non-write tools still forward their arguments verbatim', async () => {
+test('exempt read tools still forward their arguments verbatim; other tools are redacted by default', async () => {
   const token = fakeToken();
   const bridge = newBridge();
   await bridge.start();
   try {
     const { client } = await connectDownstream(bridge);
-    const res = await client.callTool({ name: 'echo', arguments: { text: token } });
-    assert.deepEqual(res.structuredContent, { echoed: token });
+    const read = await client.callTool({ name: 'mem_search', arguments: { text: token } });
+    assert.deepEqual(read.structuredContent, { results: [{ id: 1, content: token }] });
+    const other = await client.callTool({ name: 'echo', arguments: { text: token } });
+    assert.deepEqual(other.structuredContent, { echoed: '[secret removed:github]' });
     await client.close();
   } finally {
     await bridge.close();

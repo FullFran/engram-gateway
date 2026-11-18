@@ -24,15 +24,25 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
   in order: authorize → redact → forward to Engram → audit → wrap result.
   Authorize and audit are pass-through placeholders for now (roles and
   grants, audit log).
-- **Secret redaction.** Before `mem_save`, `mem_update`,
-  `mem_session_summary`, `mem_save_prompt` and `mem_capture_passive` are
-  forwarded, every string argument is scanned for well-known secret shapes
-  (Anthropic, OpenAI, GitHub, AWS, Stripe, JWT, PEM private keys, passwords
-  in URLs) and each match becomes `[secret removed:<kind>]`. Only per-kind
-  counts are kept for the audit step; the secret is never stored or logged.
-  There are no entropy heuristics, so git SHAs and UUIDs survive. Redaction
-  is on by default and has no environment switch; text stored before this
-  feature is not rewritten.
+- **Secret redaction.** Before a tool call is forwarded, every string
+  argument (values and object keys) is scanned for well-known secret shapes
+  and each match becomes `[secret removed:<kind>]`: Anthropic, OpenAI,
+  GitHub, AWS access and secret keys, Stripe, Slack, Google API keys, npm
+  tokens, JWTs, PEM private keys (also without an `END` line), `Bearer`
+  tokens, passwords in URLs, and `.env`-style assignments such as
+  `API_KEY=...` or `password: ...`. Invisible characters (zero-width spaces
+  and the like) are ignored when matching. This is default deny: every tool
+  is redacted except read-only tools whose arguments are never stored
+  (`mem_search`, `mem_context`, `mem_get_observation`, ...), so tools Engram
+  adds later are covered. Only per-kind counts are kept for the audit step;
+  the matched text is never logged. There are no entropy heuristics, so git
+  SHAs and UUIDs survive. Redaction is on by default and has no environment
+  switch.
+
+  Limits: it is pattern based. Secrets that are encoded (base64,
+  URL-encoding), split across fields or lines, written as prose ("the
+  password is ..."), or in a shape not listed above still reach Engram.
+  Text stored before this feature is not rewritten.
 - **Auth.** A built-in OAuth 2.1 authorization server: protected resource
   metadata (RFC 9728), dynamic client registration, client ID metadata
   documents, PKCE, rotating refresh tokens. People sign in with GitHub's

@@ -11,5 +11,6 @@ export const TOOLS = [
   { name: 'fail', description: 'Always reports a tool error.', inputSchema: { type: 'object', properties: {} } },
   { name: 'crash', description: 'Kills the server process.', inputSchema: { type: 'object', properties: {} } },
   { name: 'slow', description: 'Never answers.', inputSchema: { type: 'object', properties: {} } },
-  { name: 'mem_save', description: 'Echoes the received arguments back as JSON.', inputSchema: { type: 'object' } }
+  { name: 'mem_save', description: 'Echoes the received arguments back as JSON.', inputSchema: { type: 'object' } },
+  { name: 'mem_search', description: 'Returns `text` as if it were stored memory.', inputSchema: { type: 'object' } }
 ];
