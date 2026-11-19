@@ -11,9 +11,10 @@ import { CsrfTokens } from './csrf.js';
 import { alertBox, renderBarePage, renderPage, securityHeaders } from './layout.js';
 import { brainHealthContent, brainsContent } from './views/brains.js';
 import { connectionsContent } from './views/connections.js';
+import { serviceAccountsContent } from './views/service-accounts.js';
 import { userGrantsContent, usersContent } from './views/users.js';
 import { tokensContent } from './views/tokens.js';
-import type { TokensView } from './views/tokens.js';
+import type { TokenRow, TokensView } from './views/tokens.js';
 
 /** Where the panel is mounted. */
 export const UI_PATH = '/ui';
@@ -286,6 +287,57 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
     const login = req.params.login ?? '';
     adminChange(res, userPath(login), () => options.admin.revokeGrant(actor(res), login, req.params.brain ?? ''),
       (status, error) => sendUser(res, login, status, error)).catch(next);
+  });
+
+  // Service accounts and their tokens (#7)
+  const sendAccounts = (res: Response, status: number, extra: { error?: string; login?: string } = {}) =>
+    adminPage(res, 'Service accounts', '/ui/service-accounts',
+      () => serviceAccountsContent({ csrf: ctx(res).csrf, accounts: options.admin.listServiceAccounts(actor(res)), ...extra }), status);
+  const accountPath = (login: string) => `/ui/service-accounts/${encodeURIComponent(login)}`;
+  const sendAccount = (res: Response, login: string, status: number, extra: Partial<TokensView> = {}) =>
+    adminPage(res, 'Service account', '/ui/service-accounts', () => {
+      const account = options.admin.listServiceAccounts(actor(res)).find(row => row.login.toLowerCase() === login.toLowerCase());
+      if (!account) throw new AdminError('not_found', `unknown service account ${JSON.stringify(login)}`);
+      return tokensContent({
+        csrf: ctx(res).csrf,
+        account: { login: account.login, owner: account.owner, status: account.status },
+        tokens: options.admin.listServiceAccountTokens(actor(res), account.login) as TokenRow[],
+        brains: options.admin.listGrants(actor(res), { login: account.login }).map(grant => ({ brain: grant.brain, role: grant.role })),
+        ...extra
+      });
+    }, status);
+
+  router.get('/service-accounts', (_req, res) => sendAccounts(res, 200));
+  router.post('/service-accounts', (req, res, next) => {
+    const login = field(req, 'login').trim();
+    adminChange(res, accountPath(login), () => options.admin.createServiceAccount(actor(res), login), (status, error) => sendAccounts(res, status, { error, login })).catch(next);
+  });
+  router.get('/service-accounts/:login', (req, res) => sendAccount(res, req.params.login ?? '', 200));
+  router.post('/service-accounts/:login/tokens', (req, res) => {
+    const login = req.params.login ?? '';
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const form = { name: text(body.name), brains: list(body.brains), scope: text(body.scope), expires: text(body.expires) };
+    let created: { token: string; name?: unknown };
+    try {
+      created = options.admin.createServiceAccountToken(actor(res), login, {
+        name: form.name, brains: form.brains, scope: form.scope, expiresInDays: /^\d{1,4}$/.test(form.expires) ? Number(form.expires) : form.expires
+      });
+    } catch (error) {
+      if (!(error instanceof AdminError)) throw error;
+      // A refusal of the token itself is shown on the account's page; a refused admin gets the 403 page.
+      if (error.code === 'forbidden' || error.code === 'not_found') {
+        return send(res, ADMIN_STATUS[error.code], 'Service account', '/ui/service-accounts', `<h1>Service account</h1>${alertBox(error.message)}`);
+      }
+      return sendAccount(res, login, ADMIN_STATUS[error.code], { error: error.message, form });
+    }
+    // The only time the secret leaves the gateway: in this response, never in a URL.
+    sendAccount(res, login, 201, { created: { name: typeof created.name === 'string' ? created.name : form.name, token: created.token } });
+  });
+  router.post('/service-accounts/:login/tokens/:id/revoke', (req, res, next) => {
+    const login = req.params.login ?? '';
+    const id = /^\d{1,15}$/.test(req.params.id ?? '') ? Number(req.params.id) : NaN;
+    adminChange(res, accountPath(login), () => options.admin.revokeServiceAccountToken(actor(res), login, id),
+      (status, error) => sendAccount(res, login, status, { error })).catch(next);
   });
 
   router.use((_req, res) => {

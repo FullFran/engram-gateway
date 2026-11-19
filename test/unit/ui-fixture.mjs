@@ -13,7 +13,7 @@ import { SqliteAuditLog } from '../../dist/audit/index.js';
 import { HttpRequestAuthenticator } from '../../dist/auth/index.js';
 import { SqliteGrantRepository, bootstrapAccess } from '../../dist/authz/index.js';
 import { SqliteBrainRepository } from '../../dist/brains/index.js';
-import { OwnConnections, PersonalAccessTokens, SqliteConnectionStore, SqlitePatStore, nodePatSecrets, patIdentityProvider } from '../../dist/connections/index.js';
+import { OwnConnections, PersonalAccessTokens, adminPatPort, SqliteConnectionStore, SqlitePatStore, nodePatSecrets, patIdentityProvider } from '../../dist/connections/index.js';
 import { createGatewayApp } from '../../dist/http/app.js';
 import { createUiRouter } from '../../dist/ui/index.js';
 import { openGatewayDatabase } from '../../dist/shared/gateway-database.js';
@@ -54,7 +54,8 @@ export function uiSetup(t) {
     }
   };
   const admin = new AdminService({
-    store: new SqliteAdminStore(db), dirs: fsBrainDirectories(join(dir, 'brains')), clock, runtime, health
+    store: new SqliteAdminStore(db), dirs: fsBrainDirectories(join(dir, 'brains')), clock, runtime, health,
+    tokens: adminPatPort(pats, clock)
   });
   return { db, dir, grants, clock, connections, pats, audit, runtime, reports, admin };
 }
