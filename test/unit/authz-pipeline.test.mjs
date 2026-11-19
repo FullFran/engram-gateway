@@ -53,6 +53,7 @@ test('authorize stage: a denied call is never forwarded, throws ToolCallDeniedEr
   assert.equal(rows.length, 1);
   assert.equal(rows[0].target, 'mem_save');
   assert.equal(rows[0].outcome, 'denied');
+  assert.equal(rows[0].meta.denyReason, 'insufficient_role', 'the audit row says why');
   assert.equal(rows[0].actorLogin, 'alice');
   assert.equal(rows[0].brain, 'work');
   assert.ok(!JSON.stringify(rows[0]).includes('secret note'), 'no argument values in the audit row');

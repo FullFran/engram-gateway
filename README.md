@@ -26,7 +26,8 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
   restarted by the next request if it dies. Both the 2026-07-28 protocol and
   the legacy `initialize` handshake are served.
 - **Tool-call pipeline.** Every `tools/call` runs through the same stages,
-  in order: authorize → redact → forward to Engram → audit → wrap result.
+  in order: authorize → drop host paths → redact → forward to Engram →
+  audit → wrap result.
   Authorize checks the caller's role on the brain (see
   [Roles and grants](#roles-and-grants)); a refused call is never forwarded.
   Audit writes one row per call, refused ones included, to the audit log
@@ -245,6 +246,21 @@ Engram release cannot add an unreviewed tool.
   grant and the client connection's role on the brain
   (`src/authz/domain/decision.ts`); the effective role is the weaker of the
   two. Connections are not modelled yet, so a client has its user's role.
+- **A brain is the boundary, not a project.** Engram `project`s inside one
+  brain share its database: a role on the brain applies to every project in
+  it, and nothing stops a caller from reading or writing another project.
+  Put memory that needs different access in a different brain.
+- **Writers edit everyone's memory.** Observations have no owner the gateway
+  can check, so a `writer` can `mem_update`, `mem_pin`, `mem_unpin`,
+  `mem_judge` or `mem_review` any observation in the brain, including ones
+  other users saved. Give `writer` only to people you trust with the whole
+  brain; `mem_delete` stays `owner`.
+- **Host paths are dropped.** `cwd` and `directory` arguments name a path on
+  the machine that runs Engram, which behind the gateway is the gateway host:
+  Engram reads that directory and its git remote to detect a project. The
+  gateway removes both from every tool call before forwarding (any role,
+  auth on or off), so `mem_current_project` and friends report the brain's
+  own project, and the audit row counts them as `hostPathArguments`.
 
 ### Gateway database
 
@@ -276,7 +292,9 @@ brain, the action and its target (the tool name), the outcome (`ok`, `error`
 or `denied`) and the duration. It never stores memory content, argument
 values, error messages or secrets: `meta_json` keeps counts and ids only
 (for example redaction counts per kind, the observation id, the OAuth client
-id, and a fixed `errorKind` such as `forward_failed`).
+id, a fixed `errorKind` such as `forward_failed`, and for a `denied` call its
+`denyReason`: `no_grant`, `unknown_tool`, `insufficient_role` or
+`no_caller`, nothing else).
 
 - **Append-only in the database.** `BEFORE UPDATE` and `BEFORE DELETE`
   triggers abort with `audit_log is append-only`.
@@ -292,7 +310,7 @@ id, and a fixed `errorKind` such as `forward_failed`).
   rather than a two-phase write. Admin mutations write their row in the same
   transaction (`insertAuditEvent`).
 - **Every call, including failures.** A call the authorize stage refuses is
-  recorded as `denied` and never forwarded. Otherwise the audit stage runs
+  recorded as `denied`, with its `denyReason`, and never forwarded. Otherwise the audit stage runs
   after the forward: `ok`, `error` with `errorKind`
   `tool_error` (the tool answered `isError`) or `forward_failed` (the forward
   threw; the original error still reaches the client). The caller is the

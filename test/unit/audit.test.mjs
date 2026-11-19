@@ -88,6 +88,15 @@ test('meta keeps counts, booleans and id-shaped ids only', () => {
   }), { redactions: { github: 2 }, truncated: true, observationId: 'obs-12', sessionId: 'abc:1' });
 });
 
+test('meta keeps denyReason only as one of the closed deny reasons', () => {
+  for (const reason of ['no_grant', 'unknown_tool', 'insufficient_role', 'no_caller']) {
+    assert.deepEqual(toAuditMeta({ denyReason: reason }), { denyReason: reason }, reason);
+  }
+  for (const reason of ['bogus', 'No_Grant', 'no grant', '', 3, { a: 1 }]) {
+    assert.deepEqual(toAuditMeta({ denyReason: reason }), {}, String(reason));
+  }
+});
+
 test('brain is nullable and any opaque string', t => {
   const { db, log } = openLog(t);
   log.append(event({ brain: null }));

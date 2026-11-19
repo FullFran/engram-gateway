@@ -31,7 +31,11 @@ export class ToolCallDeniedError extends Error {
 export function createAuthorizeStage(access: ToolAccessCheck): RequestStage {
   return ctx => {
     const verdict = access.check(ctx.caller, ctx.brain, ctx.request.name);
-    if (!verdict.allowed) throw new ToolCallDeniedError(ctx.request.name, verdict.reason);
+    if (!verdict.allowed) {
+      // The audit stage records this context; the reason is one of a closed set (see src/audit).
+      ctx.meta.denyReason = verdict.reason;
+      throw new ToolCallDeniedError(ctx.request.name, verdict.reason);
+    }
     return ctx;
   };
 }

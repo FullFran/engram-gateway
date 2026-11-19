@@ -35,6 +35,8 @@ export type AuditErrorKind = 'forward_failed' | 'tool_error';
 
 /** String-valued meta keys allowed through, all ids; any other string is dropped. */
 const ID_KEYS = new Set(['observationId', 'clientId', 'errorKind', 'sessionId']);
+/** Why the authorize stage refused a call (#6). Any other value is dropped. */
+export const DENY_REASONS: ReadonlySet<string> = new Set(['no_grant', 'unknown_tool', 'insufficient_role', 'no_caller']);
 const META_KEY = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const ID_VALUE = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -60,7 +62,9 @@ export function toAuditMeta(input: Record<string, unknown>): AuditMeta {
   const meta: AuditMeta = {};
   for (const [key, value] of Object.entries(input)) {
     if (!META_KEY.test(key)) continue;
-    if (isCount(value) || typeof value === 'boolean') {
+    if (key === 'denyReason') {
+      if (typeof value === 'string' && DENY_REASONS.has(value)) meta[key] = value;
+    } else if (isCount(value) || typeof value === 'boolean') {
       meta[key] = value;
     } else if (typeof value === 'string') {
       if (ID_KEYS.has(key) && ID_VALUE.test(value)) meta[key] = value;
