@@ -334,6 +334,37 @@ applies to the next request.
 - **Kinds.** `oauth` connections are made on the consent page, one per user
   and OAuth client. `token` connections (code projects, CI) get their
   issuance with personal access tokens (#7).
+- **Connection tools.** On `/mcp` the client also gets four tools that act on
+  its own connection (they take no routing `brain`):
+  - `brain_list`: the connection's brains, its role and the effective role on
+    each, and the default brain.
+  - `connection_brains`: the brains the owner holds a grant on, the highest
+    role the connection could get there (the owner's), and the current role
+    when attached.
+  - `connection_attach { brain, role, default? }`: attaches a brain (or
+    changes its role); `default: true` also makes it the default brain.
+  - `connection_detach { brain }`: detaches a brain; detaching the default
+    brain leaves the connection without one.
+
+  Attach and detach are for `oauth` connections only (a `token` connection
+  is fixed when issued) and apply to the next request. They also need the
+  owner role on the connection: `owner` on at least one of its brains, which
+  the owner still holds. A connection consented with `reader` or `writer`
+  only cannot change its brains (`insufficient_role`). Attach never exceeds
+  the owner: no grant, or a role above the grant, is an MCP error (`-32602`)
+  and nothing is written. Every call is audited on the brain it acts on (or
+  no brain when the argument is not a valid brain name), a refusal as
+  `denied` (`no_grant`, `insufficient_role` or `connection_kind`); an attach
+  row also records the role asked for.
+
+  **Prompt injection.** The model calls these tools itself, so text it reads
+  (a memory, a web page, a file) can ask it to attach another brain. With
+  `owner` on a brain the connection can attach any brain its owner holds, up
+  to the owner's role, without asking the person. The consent page
+  preselects the person's own role, so an owner gets `owner` unless they
+  lower it: give a chat client `writer` or `reader` on every brain to keep
+  its brains fixed, and change them from the consent page (sign in again)
+  instead. Attach and detach are in the audit log.
 
 ### Gateway database
 

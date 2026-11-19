@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import {
   BRAIN_LOCK_FILE, BackupService, callBackupControl, createBackupCipher, expiredSnapshots, integrityCheck, nextRunAt, openBrainLock,
   parseBackupKey, parseSnapshotId, resolveBackupConfig, serveBackupControl, snapshotDatabase, sqliteSnapshotter
@@ -15,6 +15,8 @@ import { runCli } from '../../dist/cli/backup-commands.js';
 
 const scratchRoot = mkdtempSync(join(tmpdir(), 'backup-test-'));
 const scratch = name => mkdtempSync(join(scratchRoot, `${name}-`));
+// Each run made ~110 MB here and left it behind; the file's tests never need it afterwards.
+after(() => rmSync(scratchRoot, { recursive: true, force: true }));
 const quiet = Object.fromEntries(['debug', 'info', 'warn', 'error'].map(l => [l, () => {}]));
 const KEY = randomBytes(32);
 const OTHER_KEY = randomBytes(32);

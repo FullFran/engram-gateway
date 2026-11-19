@@ -31,4 +31,12 @@ export interface ConnectionStore extends ConnectionReader {
   saveOAuth(login: string, clientId: string, choice: ConnectionChoice): number;
   /** Creates a `token` connection (code projects, CI); issuance lands with #7. */
   createToken(login: string, choice: ConnectionChoice): number;
+  /**
+   * Attaches `brain` with `role`, or changes its role when already attached;
+   * `makeDefault` also makes it the default brain. The caller has already
+   * checked the role against the owner's grant.
+   */
+  attach(connectionId: number, brain: string, role: Role, makeDefault: boolean): void;
+  /** Detaches `brain`; false when it was not attached. Detaching the default brain leaves the connection without one. */
+  detach(connectionId: number, brain: string): boolean;
 }

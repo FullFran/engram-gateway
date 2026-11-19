@@ -19,6 +19,8 @@ export interface GatewayToolDefinition {
 export interface GatewayToolCaller {
   login?: string;
   clientId?: string;
+  /** The connection (#27) the call came through, on the bare `/mcp`. */
+  connectionId?: number;
   /** The effective role the authorize stage decided on this brain. */
   role?: string;
 }

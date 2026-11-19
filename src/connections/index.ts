@@ -10,5 +10,9 @@ export { ALL_BRAINS, BRAIN_ARGUMENT, FAN_OUT_TOOLS, mergeFanOut, resolveTarget, 
 export type { BrainOutcome, BrainTarget } from './domain/brain-argument.js';
 export { ConnectionNameTakenError } from './application/ports.js';
 export type { ConnectionReader, ConnectionStore } from './application/ports.js';
+export { parseConnectionTool } from './domain/connection-tools.js';
+export type { ConnectionToolArguments, ParsedConnectionTool } from './domain/connection-tools.js';
+export { ConnectionAdmin } from './application/connection-admin.js';
+export type { AttachOutcome, AttachableBrain, ConnectionToolAccess, ConnectionToolCheck, ConnectionView, OwnerGrants } from './application/connection-admin.js';
 export { ConnectionConsentService, NO_ROLE } from './application/connection-consent.js';
 export { SqliteConnectionStore } from './infrastructure/sqlite-connection-store.js';

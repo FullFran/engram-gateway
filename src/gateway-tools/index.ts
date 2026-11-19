@@ -8,3 +8,5 @@ export type { GatewayTool, GatewayToolCaller, GatewayToolContext, GatewayToolDef
 export { createGatewayToolSet, mergeToolLists } from './application/gateway-tool-set.js';
 export type { GatewayToolSet, ToolRoleTables } from './application/gateway-tool-set.js';
 export { BRAIN_HEALTH_TOOL, createBrainHealthTool } from './tools/brain-health.js';
+export { CONNECTION_TOOL_NAMES, createConnectionTools } from './tools/connection-tools.js';
+export type { ConnectionAdminPort } from './tools/connection-tools.js';

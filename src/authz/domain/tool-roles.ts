@@ -56,6 +56,21 @@ export const GATEWAY_TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(
   brain_health: 'owner'
 } satisfies Record<string, Role>));
 
+/**
+ * The connection tools (#27): they act on the caller's connection, not on a
+ * brain, so they have no brain role. Each lists the connection kinds that may
+ * call it. Reading the connection is open to every connection; changing its
+ * brains is reserved to `oauth` connections, whose owner made them on the
+ * consent screen (a `token` connection is fixed when it is issued, #7). Attach
+ * is further capped by the owner's grant on the brain (src/connections).
+ */
+export const CONNECTION_TOOL_KINDS: Readonly<Record<string, readonly ('oauth' | 'token')[]>> = Object.freeze(Object.assign(Object.create(null) as Record<string, readonly ('oauth' | 'token')[]>, {
+  brain_list: ['oauth', 'token'],
+  connection_brains: ['oauth', 'token'],
+  connection_attach: ['oauth'],
+  connection_detach: ['oauth']
+}));
+
 /** The minimum role for `tool` (engram's or the gateway's); undefined for a tool neither table knows (denied). */
 export function requiredRole(tool: string): Role | undefined {
   if (Object.hasOwn(GATEWAY_TOOL_ROLES, tool)) return GATEWAY_TOOL_ROLES[tool];

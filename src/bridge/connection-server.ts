@@ -1,12 +1,12 @@
 import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/server';
 import { BrainCapacityError } from '../brains/index.js';
 import type { McpServerFactory } from '@modelcontextprotocol/server';
-import type { ConnectionReader } from '../connections/index.js';
+import type { Connection, ConnectionReader, ConnectionToolAccess } from '../connections/index.js';
 import { mergeFanOut, resolveTarget, withBrainArgument } from '../connections/index.js';
 import type { BrainOutcome } from '../connections/index.js';
 import type { Logger } from '../shared/logger.js';
 import { ToolCallDeniedError, runToolCall } from '../pipeline/index.js';
-import type { ToolCaller, ToolCallPipeline, ToolCallRequest, ToolCallResult } from '../pipeline/index.js';
+import type { RequestStage, ToolCaller, ToolCallPipeline, ToolCallRequest, ToolCallResult } from '../pipeline/index.js';
 import { mergeToolLists } from '../gateway-tools/index.js';
 import type { GatewayToolSet } from '../gateway-tools/index.js';
 import { callerOf, gatewayToolContext } from './engram-bridge.js';
@@ -28,6 +28,12 @@ export interface ConnectionServerOptions {
   /** Tools the gateway serves itself (e.g. `brain_health`), as on `/mcp/<brain>`: they also take `brain`. */
   gatewayTools?: GatewayToolSet;
   logger: Logger;
+  /**
+   * The connection tools (brain_list, connection_*): they act on the
+   * connection, take no `brain` routing argument, and are authorized by
+   * `access` (connection kind, owner's grant) instead of a brain role.
+   */
+  connectionTools?: { tools: GatewayToolSet; access: ConnectionToolAccess };
   /** Upper bound for a whole `brain: "*"` call; a brain still running when it ends is reported as timed out (and its call cancelled). */
   fanOutTimeoutMs?: number;
   /**
@@ -66,7 +72,7 @@ const invalid = (message: string): ProtocolError => new ProtocolError(ProtocolEr
  * brain it targets, with a lease on that brain held only for the call.
  */
 export function createConnectionServer(opts: ConnectionServerOptions): McpServerFactory {
-  const { brains, connections, pipeline, gatewayTools, logger } = opts;
+  const { brains, connections, pipeline, gatewayTools, connectionTools, logger } = opts;
   const fanOutTimeoutMs = opts.fanOutTimeoutMs ?? DEFAULT_FAN_OUT_TIMEOUT_MS;
   const maxFanOutsPerLogin = opts.maxFanOutsPerLogin ?? DEFAULT_MAX_FAN_OUTS_PER_LOGIN;
   /** Fan-outs running now, per lowercased login. */
@@ -111,6 +117,25 @@ export function createConnectionServer(opts: ConnectionServerOptions): McpServer
     return runToolCall(pipeline, request, (call, ctx) => gatewayTools?.has(call.name)
       ? gatewayTools.call(call.name, call.arguments, gatewayToolContext(ctx))
       : withBrain(brain, process => process.callTool(call, signal ? { signal } : undefined)), { caller, brain });
+  }
+
+  /**
+   * A connection tool, through the same pipeline: only the authorize stage is
+   * replaced by the connection tool check, so a refusal is audited as denied
+   * (on the brain the call acts on) and an allowed call is audited and wrapped.
+   */
+  async function callConnectionTool(caller: ToolCaller, connection: Connection, tools: GatewayToolSet, access: ConnectionToolAccess, request: ToolCallRequest): Promise<ToolCallResult> {
+    const verdict = access.check(connection, request.name, request.arguments);
+    if (verdict.kind === 'invalid') throw invalid(verdict.message);
+    const authorize: RequestStage = ctx => {
+      if (verdict.role) ctx.meta.role = verdict.role;
+      if (verdict.kind === 'denied') {
+        ctx.meta.denyReason = verdict.reason;
+        throw new ToolCallDeniedError(request.name, verdict.reason);
+      }
+      return ctx;
+    };
+    return runToolCall({ ...pipeline, authorize }, request, (call, ctx) => tools.call(call.name, call.arguments, gatewayToolContext(ctx)), { caller, brain: verdict.brain });
   }
 
   async function fanOut(caller: ToolCaller, targets: string[], request: ToolCallRequest): Promise<ToolCallResult> {
@@ -185,17 +210,29 @@ export function createConnectionServer(opts: ConnectionServerOptions): McpServer
       const connection = connectionOf(caller);
       const slugs = connection.brains.map(b => b.brain);
       const source = connection.defaultBrain ?? slugs[0];
-      if (!source || !caller) return { tools: [] };
+      const own = connectionTools
+        ? connectionTools.tools.definitions().filter(tool => connectionTools.access.visible(connection.kind, tool.name))
+        : [];
+      if (!source || !caller) return { tools: own } as never;
       // Every brain runs the same Engram, so one brain's list is the list.
       const engram = await withBrain(source, process => process.listTools());
       const tools = gatewayTools ? mergeToolLists(engram, gatewayTools.definitions() as typeof engram) : engram;
       const allowed = new Set(slugs.flatMap(brain => pipeline.listTools({ caller, brain }, tools).map(tool => tool.name)));
-      return { tools: tools.filter(tool => allowed.has(tool.name)).map(tool => withBrainArgument(tool, slugs, connection.defaultBrain)) };
+      const brainTools = tools.filter(tool => allowed.has(tool.name)).map(tool => withBrainArgument(tool, slugs, connection.defaultBrain));
+      return { tools: [...brainTools, ...own] } as never;
     });
 
     server.setRequestHandler('tools/call', async request => {
       const connection = connectionOf(caller);
       const { name, arguments: args } = request.params;
+      if (connectionTools?.tools.has(name)) {
+        try {
+          return (await callConnectionTool(caller!, connection, connectionTools.tools, connectionTools.access, { name, arguments: args })) as never;
+        } catch (error) {
+          if (error instanceof ToolCallDeniedError) throw invalid(error.message);
+          throw error;
+        }
+      }
       const slugs = connection.brains.map(b => b.brain);
       const target = resolveTarget(name, args, slugs, connection.defaultBrain);
       if (target.kind === 'invalid') throw invalid(target.message);
