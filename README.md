@@ -657,6 +657,7 @@ or a personal access token never opens it. With auth off there is no panel.
 | `/ui/users/<login>` | instance admins | The user's grants and where each comes from; set or change a role on an active brain, revoke a grant made in the panel or the API (grants from `BRAIN_GRANTS` are changed there). Audited as `grant.set` / `grant.revoke` |
 | `/ui/service-accounts` | instance admins | Service accounts (#7) with status and owner; create one (you become its owner). Audited as `service_account.create` |
 | `/ui/service-accounts/<login>` | instance admins | The account's personal access tokens: create one on the brains it holds a grant on (the secret is shown once), revoke one. Its grants and disabling it are on its `/ui/users/<login>` page |
+| `/ui/audit` | instance admins | The audit log, newest first, 50 entries a page: filter by brain, action, actor, outcome and UTC dates; a link downloads the CSV export (`/admin/api/audit.csv`) of the same brain and dates |
 | `/ui/connections` | every signed-in user | Your OAuth connections (one per MCP client you approved): their brains, roles and effective roles; attach a brain (with at most your own grant, optionally as the default) or detach one. Audited as `connection.attach` / `connection.detach` |
 | `/ui/tokens` | every signed-in user | Your personal access tokens: create (the secret is shown once), list, revoke |
 

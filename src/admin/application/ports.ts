@@ -1,5 +1,5 @@
 import type { BrainHealthLookup } from '../../health/index.js';
-import type { AuditEvent, AuditFilter, AuditRecord } from '../../audit/index.js';
+import type { AuditEvent, AuditFilter, AuditQuery, AuditRecord } from '../../audit/index.js';
 import type { Role } from '../../authz/index.js';
 import type { AdminActor } from '../domain/admin-actor.js';
 import type { BrainView, GrantSource, GrantView, ServiceAccountView, UserStatus, UserView } from '../domain/views.js';
@@ -37,6 +37,8 @@ export interface AdminStore {
   /** Reads audit rows oldest first, lazily. */
   readAudit(filter: AuditFilter): Iterable<AuditRecord>;
   /** How many audit rows match, counting no further than `upTo`. */
+  /** A page of the log, newest first (#17). */
+  queryAudit(query: AuditQuery): AuditRecord[];
   countAudit(filter: AuditFilter, upTo: number): number;
 }
 

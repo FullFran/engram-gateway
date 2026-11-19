@@ -1,7 +1,7 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { AdminError } from '../../../admin/index.js';
-import type { AdminActor, AdminService } from '../../../admin/index.js';
+import type { AdminActor, AdminService, AuditQueryRequest } from '../../../admin/index.js';
 import { isSameOrigin } from '../../../auth/index.js';
 import type { Role } from '../../../authz/index.js';
 import { OwnConnectionError, PatError, patJson } from '../../../connections/index.js';
@@ -9,6 +9,8 @@ import type { OwnConnections, PersonalAccessTokens } from '../../../connections/
 import type { Logger } from '../../../shared/logger.js';
 import { CsrfTokens } from './csrf.js';
 import { alertBox, renderBarePage, renderPage, securityHeaders } from './layout.js';
+import { auditContent } from './views/audit.js';
+import type { AuditFilterForm } from './views/audit.js';
 import { brainHealthContent, brainsContent } from './views/brains.js';
 import { connectionsContent } from './views/connections.js';
 import { serviceAccountsContent } from './views/service-accounts.js';
@@ -338,6 +340,62 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
     const id = /^\d{1,15}$/.test(req.params.id ?? '') ? Number(req.params.id) : NaN;
     adminChange(res, accountPath(login), () => options.admin.revokeServiceAccountToken(actor(res), login, id),
       (status, error) => sendAccount(res, login, status, { error })).catch(next);
+  });
+
+  // The audit log (#8): a read, so a GET form with no CSRF token
+  const DAY_MS = 86_400_000;
+  const dayParam = (value: string, name: string): number | undefined => {
+    if (value === '') return undefined;
+    const ms = /^\d{4}-\d{2}-\d{2}$/.test(value) ? Date.parse(`${value}T00:00:00Z`) : NaN;
+    if (!Number.isFinite(ms)) throw new AdminError('invalid', `${name} must be a date (YYYY-MM-DD)`);
+    return ms;
+  };
+  const countParam = (value: string, name: string): number | undefined => {
+    if (value === '') return undefined;
+    if (!/^\d{1,15}$/.test(value)) throw new AdminError('invalid', `${name} must be a positive integer`);
+    return Number(value);
+  };
+  router.get('/audit', (req, res) => {
+    const query = (name: string) => text(req.query[name]).trim();
+    const form: AuditFilterForm = { brain: query('brain'), action: query('action'), actor: query('actor'), outcome: query('outcome'), from: query('from'), to: query('to') };
+    const csv = new URLSearchParams();
+    let rows: ReturnType<AdminService['queryAudit']>['rows'] = [];
+    let olderHref: string | null = null;
+    let error: string | undefined;
+    try {
+      const fromMs = dayParam(form.from, 'from');
+      const toDay = dayParam(form.to, 'to');
+      const toMs = toDay === undefined ? undefined : toDay + DAY_MS;
+      const request: AuditQueryRequest = {};
+      if (form.brain) request.brain = form.brain;
+      if (form.action) request.action = form.action;
+      if (form.actor) request.actor = form.actor;
+      if (form.outcome) request.outcome = form.outcome;
+      if (fromMs !== undefined) request.fromMs = fromMs;
+      if (toMs !== undefined) request.toMs = toMs;
+      const limit = countParam(query('limit'), 'limit');
+      const before = countParam(query('before'), 'before');
+      if (limit !== undefined) request.limit = limit;
+      if (before !== undefined) request.before = before;
+      const page = options.admin.queryAudit(actor(res), request);
+      rows = page.rows;
+      if (page.nextBefore !== null) {
+        const next = new URLSearchParams(Object.entries(form).filter(([, value]) => value !== ''));
+        if (limit !== undefined) next.set('limit', String(limit));
+        next.set('before', String(page.nextBefore));
+        olderHref = `/ui/audit?${next}`;
+      }
+      if (form.brain) csv.set('brain', form.brain);
+      if (fromMs !== undefined) csv.set('from', new Date(fromMs).toISOString());
+      if (toMs !== undefined) csv.set('to', new Date(toMs).toISOString());
+    } catch (caught) {
+      // A bad filter is shown above the form; a refused reader gets the 403 page.
+      if (!(caught instanceof AdminError)) throw caught;
+      if (caught.code !== 'invalid') return send(res, ADMIN_STATUS[caught.code], 'Audit log', '/ui/audit', `<h1>Audit log</h1>${alertBox(caught.message)}`);
+      error = caught.message;
+    }
+    const csvHref = `/admin/api/audit.csv${csv.size > 0 ? `?${csv}` : ''}`;
+    send(res, error ? 400 : 200, 'Audit log', '/ui/audit', auditContent({ form, rows, olderHref, csvHref, ...(error ? { error } : {}) }));
   });
 
   router.use((_req, res) => {

@@ -1,6 +1,6 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 import type { AuditActor, AuditEvent, AuditMeta, AuditOutcome } from '../domain/audit-event.js';
-import type { AuditFilter, AuditLog, AuditReader, AuditRecord } from '../application/ports.js';
+import type { AuditFilter, AuditLog, AuditQuery, AuditReader, AuditRecord } from '../application/ports.js';
 import { immediateTransaction } from '../../shared/sqlite-database.js';
 
 /** Rows fetched per query while reading; keeps an export's memory flat. */
@@ -60,6 +60,25 @@ export class SqliteAuditLog implements AuditLog, AuditReader {
   }
 
   /** Oldest first, fetched in pages by id, so callers can stream any size of log. */
+  /** A page of the log, newest first; keyset by id, so a page never shifts when rows are added. */
+  query(query: AuditQuery): AuditRecord[] {
+    const where = ['1 = 1'];
+    const params: SQLInputValue[] = [];
+    if (query.brain !== undefined) { where.push('a.brain_id = ?'); params.push(query.brain); }
+    if (query.action !== undefined) { where.push('a.action = ?'); params.push(query.action); }
+    if (query.actor !== undefined) { where.push("a.actor_kind = 'user' AND u.github_login = ? COLLATE NOCASE"); params.push(query.actor); }
+    if (query.outcome !== undefined) { where.push('a.outcome = ?'); params.push(query.outcome); }
+    if (query.fromMs !== undefined) { where.push('a.at_ms >= ?'); params.push(query.fromMs); }
+    if (query.toMs !== undefined) { where.push('a.at_ms < ?'); params.push(query.toMs); }
+    if (query.before !== undefined) { where.push('a.id < ?'); params.push(query.before); }
+    const rows = this.db.prepare(
+      `SELECT a.*, u.github_login AS actor_login FROM audit_log a
+       LEFT JOIN users u ON a.actor_kind = 'user' AND u.id = CAST(a.actor_id AS INTEGER)
+       WHERE ${where.join(' AND ')} ORDER BY a.id DESC LIMIT ?`
+    ).all(...params, query.limit);
+    return rows.map(row => record(row));
+  }
+
   *read(filter: AuditFilter = {}): Generator<AuditRecord> {
     const where = ['a.id > ?'];
     const params: SQLInputValue[] = [];
