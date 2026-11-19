@@ -197,7 +197,10 @@ test('access policy: sign-in needs an active user, a token needs a grant on its 
   db.prepare("INSERT INTO users (github_login) VALUES ('dave')").run();
   assert.equal(policy.maySignIn('dave'), false, 'a users row without any grant does not sign in');
   assert.equal(policy.mayUse('alice', `${RESOURCE}/work`), true);
-  assert.equal(policy.mayUse('alice', RESOURCE), false, 'no token for a brain without a grant');
+  assert.equal(policy.mayUse('alice', `${RESOURCE}/default`), false, 'no token for a brain without a grant');
+  // The bare /mcp resource makes a connection (#27) over the brains alice holds; each call is checked per brain.
+  assert.equal(policy.mayUse('alice', RESOURCE), true, 'the bare resource needs any grant');
+  assert.equal(policy.mayUse('dave', RESOURCE), false, 'and no grant at all means no token');
   assert.equal(policy.mayUse('FullFran', RESOURCE), true);
   assert.equal(policy.mayUse('FullFran', 'https://memory.example.com/elsewhere'), false);
   assert.deepEqual(policy.describeResource(`${RESOURCE}/work`), { name: 'Engram memory' });

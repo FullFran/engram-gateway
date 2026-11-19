@@ -28,7 +28,7 @@ import {
   BackupService, CONTROL_SOCKET_NAME, createBackupCipher, openBrainLock, resolveBackupConfig, serveBackupControl, sqliteSnapshotter, startBackupSchedule
 } from './backup/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
-import { createEngramBridge } from './bridge/index.js';
+import { createConnectionServer, createEngramBridge } from './bridge/index.js';
 import { ConnectionConsentService, SqliteConnectionStore } from './connections/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
 import { createBrainHealthTool, createGatewayToolSet } from './gateway-tools/index.js';
@@ -192,7 +192,9 @@ async function main(): Promise<void> {
     trustProxy: config.trustProxy,
     ...(auth ? {
       auth: { router: auth.router, authenticator: auth.authenticator, resource: auth.settings.resources[0]! },
-      brainAccess: { mayOpen: (login: string, brain: string) => grants.roleOf(login, brain) !== undefined }
+      brainAccess: { mayOpen: (login: string, brain: string) => grants.roleOf(login, brain) !== undefined },
+      // Connection tokens on /mcp (#27): the brain is chosen per call.
+      connectionServer: createConnectionServer({ brains: registry, connections, pipeline, gatewayTools, logger })
     } : {}),
     brains: registry,
     admin: {
