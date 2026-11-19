@@ -72,10 +72,63 @@ export function migrate(db: DatabaseSync, migrations: Migration[]): number {
   }
 }
 
+const SQLITE_BUSY = 5;
+
+/** True for SQLITE_BUSY and its extended codes (BUSY_RECOVERY, BUSY_SNAPSHOT, ...). */
+export function isBusyError(error: unknown): boolean {
+  const errcode = (error as { errcode?: unknown } | null)?.errcode;
+  return typeof errcode === 'number' && (errcode & 0xff) === SQLITE_BUSY;
+}
+
+export interface BusyRetryOptions {
+  /** Give up after this long and rethrow the last SQLITE_BUSY. Default 10 s. */
+  maxWaitMs?: number;
+  /** First pause; it doubles up to `maxDelayMs`. Defaults 10 ms and 250 ms. */
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  nowMs?: () => number;
+  sleepMs?: (ms: number) => void;
+}
+
+const pause = new Int32Array(new SharedArrayBuffer(4));
+const sleepSync = (ms: number): void => { Atomics.wait(pause, 0, 0, ms); };
+
+/**
+ * Runs `work` again while it fails with SQLITE_BUSY, pausing with a bounded,
+ * jittered exponential backoff, until `maxWaitMs` has passed. SQLite does not
+ * call the busy handler for every lock (switching the journal mode, or a lock
+ * upgrade that could deadlock), so `busy_timeout` alone does not cover two
+ * processes opening a fresh database together (#33). Any other error is
+ * thrown at once. `work` must be safe to repeat.
+ */
+export function retryOnBusy<T>(work: () => T, opts: BusyRetryOptions = {}): T {
+  const now = opts.nowMs ?? Date.now;
+  const sleep = opts.sleepMs ?? sleepSync;
+  const maxDelay = opts.maxDelayMs ?? 250;
+  const deadline = now() + (opts.maxWaitMs ?? 10_000);
+  let delay = opts.initialDelayMs ?? 10;
+  for (;;) {
+    try {
+      return work();
+    } catch (error) {
+      if (!isBusyError(error) || now() >= deadline) throw error;
+      sleep(Math.min(delay, maxDelay) * (0.5 + Math.random() / 2));
+      delay = Math.min(delay * 2, maxDelay);
+    }
+  }
+}
+
+function journalMode(db: DatabaseSync): string {
+  return String(db.prepare('PRAGMA journal_mode').get()?.journal_mode ?? '').toLowerCase();
+}
+
 /**
  * Opens (creating it, mode 0600, in a 0700 directory) a SQLite file shared by
  * several processes: WAL journal, foreign keys on, 5 s busy timeout. Then
- * applies pending migrations.
+ * applies pending migrations. The WAL switch (skipped when the file already
+ * is in WAL mode, as every open after the first) and the migrations are
+ * retried on SQLITE_BUSY, so gateways starting together on a new file wait
+ * for each other instead of failing (#33).
  */
 export function openSqliteDatabase(path: string, migrations: Migration[]): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -85,9 +138,11 @@ export function openSqliteDatabase(path: string, migrations: Migration[]): Datab
   const db = new DatabaseSync(path);
   try {
     db.exec('PRAGMA busy_timeout = 5000');
-    db.exec('PRAGMA journal_mode = WAL');
+    retryOnBusy(() => {
+      if (journalMode(db) !== 'wal') db.exec('PRAGMA journal_mode = WAL');
+    });
     db.exec('PRAGMA foreign_keys = ON');
-    migrate(db, migrations);
+    retryOnBusy(() => migrate(db, migrations));
     return db;
   } catch (error) {
     db.close();
