@@ -11,6 +11,7 @@ import {
   effectiveRole, parseBrainGrants, requiredRole
 } from '../../dist/authz/index.js';
 import { SqliteBrainRepository } from '../../dist/brains/index.js';
+import { DENY_REASONS } from '../../dist/audit/index.js';
 import { openGatewayDatabase } from '../../dist/shared/gateway-database.js';
 import { ENGRAM_TOOLS } from '../fixtures/engram-tools.mjs';
 
@@ -130,6 +131,22 @@ test('revocation takes effect on the next check: no cached authorization', t => 
   assert.equal(access.check({ login: 'alice' }, 'default', 'mem_save').allowed, false);
   assert.equal(access.check(undefined, 'default', 'mem_search').allowed, false, 'no caller, no access');
   assert.equal(access.check({ login: 'alice' }, null, 'mem_search').allowed, false, 'no brain, no access');
+});
+
+test('every reason the access check gives is one the audit log keeps', t => {
+  const db = scratchDb(t);
+  const brains = withBrains(db, ['default']);
+  const repo = new SqliteGrantRepository(db);
+  bootstrapAccess(repo, { admins: [], grants: [{ login: 'alice', brain: 'default', role: 'reader' }], brains });
+  const access = createToolAccess(repo);
+  const reasons = [
+    access.check(undefined, 'default', 'mem_search'),
+    access.check({ login: 'bob' }, 'default', 'mem_search'),
+    access.check({ login: 'alice' }, 'default', 'mem_brand_new'),
+    access.check({ login: 'alice' }, 'default', 'mem_save')
+  ].map(verdict => verdict.reason);
+  assert.deepEqual(reasons, ['no_caller', 'no_grant', 'unknown_tool', 'insufficient_role']);
+  assert.deepEqual([...DENY_REASONS].sort(), [...reasons].sort());
 });
 
 const RESOURCE = 'https://memory.example.com/mcp';

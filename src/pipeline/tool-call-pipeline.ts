@@ -1,7 +1,7 @@
 /**
  * The one tool-call pipeline every `tools/call` goes through:
  *
- *   authorize (#6) -> redact (#9) -> forward to Engram -> audit (#8) -> wrap result (#19)
+ *   authorize (#6) -> drop host paths -> redact (#9) -> forward to Engram -> audit (#8) -> wrap result (#19)
  *
  * Each stage is a plain function so stages compose and can be tested alone.
  * Request stages see (and may replace) the call before it is forwarded; result
@@ -14,6 +14,7 @@
  */
 import { ToolCallDeniedError, createAuthorizeStage, filterToolList } from './authorize.js';
 import type { ToolAccessCheck, ToolListContext } from './authorize.js';
+import { stripHostPaths } from './host-paths.js';
 import { createRedactStage } from './redact.js';
 import { createWrapStage } from './wrap-data.js';
 
@@ -74,6 +75,8 @@ export type ToolListStage = <T extends { name: string }>(ctx: ToolListContext, t
 
 export interface ToolCallPipeline {
   authorize: RequestStage;
+  /** Drops host path arguments (`cwd`, `directory`) before anything else reads them. */
+  hostPaths: RequestStage;
   redact: RequestStage;
   audit: AuditStage;
   wrap: ResultStage;
@@ -103,6 +106,7 @@ export const passResult: ResultStage = (_ctx, result) => result;
 export function createToolCallPipeline(opts: ToolCallPipelineOptions = {}): ToolCallPipeline {
   return {
     authorize: opts.authorize ?? (opts.access ? createAuthorizeStage(opts.access) : allowAll),
+    hostPaths: opts.hostPaths ?? stripHostPaths,
     redact: opts.redact ?? createRedactStage({ enabled: opts.redactSecrets ?? true }),
     audit: opts.audit ?? noAudit,
     wrap: opts.wrap ?? createWrapStage(),
@@ -141,6 +145,7 @@ export async function runToolCall(pipeline: ToolCallPipeline, request: ToolCallR
     if (error instanceof ToolCallDeniedError) await pipeline.audit(ctx, { ok: false, denied: error }, call);
     throw error;
   }
+  ctx = await pipeline.hostPaths(ctx);
   ctx = await pipeline.redact(ctx);
   let result: ToolCallResult;
   try {
