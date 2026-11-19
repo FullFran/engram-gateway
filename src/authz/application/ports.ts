@@ -20,6 +20,12 @@ export interface GrantReader {
   grantsOf(login: string): { brain: string; role: Role }[];
 }
 
+/** Which brains are served right now, read from the brains table on every call. */
+export interface ActiveBrains {
+  /** A brain that exists and is not archived. */
+  isActive(slug: string): boolean;
+}
+
 /** What startup writes: the instance admins and the configured grants, replacing the previous configured ones. */
 export interface AccessSnapshot {
   admins: readonly string[];

@@ -617,14 +617,14 @@ What each operation does:
   (mode `0700`, refused if it exists and is not empty) and the brain row;
   instance admins own it. The running gateway serves `/mcp/<slug>` on the
   next request (the brain registry reads the `brains` table on every
-  request). With OAuth on, **restart the gateway before clients connect to
-  it**: each brain's OAuth protected resource (token audience and its
-  `/.well-known/oauth-protected-resource/mcp/<slug>` document) is registered
-  at startup, so no token can be issued for a new brain until then.
-  Backups and the brain's lock also cover it from the next restart. The
+  request). With OAuth on, its protected resource (token audience and its
+  `/.well-known/oauth-protected-resource/mcp/<slug>` document) exists at
+  once too, so clients can get tokens for it without a restart. Backups,
+  `brain_health` and the brain's lock cover it without a restart. The
   cloud-sync flag still comes from `ENGRAM_CLOUD_BRAINS` only.
 - **Archive a brain.** The brain is no longer served: `/mcp/<slug>` answers
-  404, its grants give no access, no token is issued for it, and its running
+  404, its grants give no access, no token is issued for it (its OAuth
+  resource and metadata document are gone at once), and its running
   child is stopped through the registry (from the CLI, which cannot reach
   the running gateway, the child stops when idle; new requests are refused
   at once). Its row, grants and data directory stay on disk; nothing is

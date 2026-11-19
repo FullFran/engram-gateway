@@ -138,7 +138,7 @@ test('archiving a brain stops its child, refuses new sessions and access, and ke
   const s = scratch(t);
   mkdirSync(join(s.root, 'team'), { recursive: true });
   writeFileSync(join(s.root, 'team', 'engram.db'), 'memories');
-  const policy = new GrantAccessPolicy(s.grants, ['http://x/mcp', 'http://x/mcp/team']);
+  const policy = new GrantAccessPolicy(s.grants, 'http://x/mcp', { isActive: slug => s.brains.findActive(slug) !== undefined });
   assert.equal(policy.mayUse('alice', 'http://x/mcp/team'), true);
 
   const archived = await s.service.archiveBrain(ADMIN, 'team');
@@ -184,7 +184,7 @@ test('listing brains shows status and, from the running gateway, live/idle', t =
 
 test('an invite is activated by the first successful sign-in once the user holds a grant; disable and enable', t => {
   const s = scratch(t);
-  const policy = new GrantAccessPolicy(s.grants, ['http://x/mcp', 'http://x/mcp/team']);
+  const policy = new GrantAccessPolicy(s.grants, 'http://x/mcp', { isActive: slug => s.brains.findActive(slug) !== undefined });
   assert.deepEqual(s.service.inviteUser(ADMIN, 'Erin'), { login: 'Erin', status: 'invited', isAdmin: false, kind: 'human' });
   assert.throws(() => s.service.inviteUser(ADMIN, 'erin'), rejectsWith('conflict'), 'logins are case-insensitive');
   assert.throws(() => s.service.inviteUser(ADMIN, 'not a login'), rejectsWith('invalid'));

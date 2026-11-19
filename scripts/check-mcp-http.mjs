@@ -424,6 +424,15 @@ async function checkAdmin(github) {
     }
     ok('a brain created at runtime gets a health report and its brain lock without a restart (#43)');
 
+    // --- #52: OAuth resources follow the brains table, not the startup list ---
+    const gammaMetadata = await request(base, { path: '/.well-known/oauth-protected-resource/mcp/gamma' });
+    assertEqual(gammaMetadata.status, 200, 'a brain created at runtime has its resource metadata without a restart');
+    assertEqual(gammaMetadata.body.resource, `${base}/mcp/gamma`, 'the metadata names gamma\'s resource');
+    const liveGamma = await obtainToken(base, admin.jar, `${base}/mcp/gamma`);
+    assert(liveGamma.accessToken, `OAuth authorize with resource=/mcp/gamma succeeds without a restart (authorize answered ${liveGamma.page.status}: ${liveGamma.page.text.slice(0, 200)})`);
+    assertEqual((await mcpToolsList(base, '/mcp/gamma', bearer(liveGamma.accessToken))).status, 200, 'the OAuth token works on /mcp/gamma');
+    ok('a brain created at runtime gets OAuth tokens and its resource metadata without a restart (#52)');
+
     // --- restart: the API grant survives; gamma gets its OAuth resource ---
     await gateway.stop();
     gateway = await startGateway(scratch, env);
@@ -437,6 +446,11 @@ async function checkAdmin(github) {
     assertEqual((await mcpToolsList(base, '/mcp/gamma', bearer(adminGamma.accessToken))).status, 404, 'an archived brain is not served');
     assert(existsSync(join(brainsRoot, 'gamma')), 'the archived brain keeps its data directory');
     ok('archiving a brain refuses new sessions and keeps its data');
+    const archivedAuthorize = await obtainToken(base, admin.jar, `${base}/mcp/gamma`);
+    assertEqual(archivedAuthorize.accessToken, undefined, 'OAuth authorize refuses an archived brain\'s resource');
+    assert(archivedAuthorize.page.status !== 200, `authorize for an archived brain shows no consent page (got ${archivedAuthorize.page.status})`);
+    assertEqual((await request(base, { path: '/.well-known/oauth-protected-resource/mcp/gamma' })).status, 404, 'an archived brain has no resource metadata');
+    ok('an archived brain\'s OAuth resource is refused at once (#52)');
 
     // --- audit CSV ---
     const csv = await api('GET', '/audit.csv');

@@ -190,8 +190,8 @@ test('access policy: sign-in needs an active user, a token needs a grant on its 
   const brains = withBrains(db, ['default', 'work']);
   const repo = new SqliteGrantRepository(db);
   bootstrapAccess(repo, { admins: ['FullFran'], grants: [{ login: 'alice', brain: 'work', role: 'reader' }], brains });
-  const resources = [RESOURCE, `${RESOURCE}/default`, `${RESOURCE}/work`];
-  const policy = new GrantAccessPolicy(repo, resources);
+  const brainRepo = new SqliteBrainRepository(db);
+  const policy = new GrantAccessPolicy(repo, RESOURCE, { isActive: slug => brainRepo.findActive(slug) !== undefined });
   assert.equal(policy.maySignIn('FullFran'), true);
   assert.equal(policy.maySignIn('alice'), true, 'a user with grants signs in without being an admin');
   assert.equal(policy.maySignIn('mallory'), false);
@@ -206,4 +206,11 @@ test('access policy: sign-in needs an active user, a token needs a grant on its 
   assert.equal(policy.mayUse('FullFran', 'https://memory.example.com/elsewhere'), false);
   assert.deepEqual(policy.describeResource(`${RESOURCE}/work`), { name: 'Engram memory' });
   assert.equal(policy.describeResource('https://memory.example.com/elsewhere'), undefined);
+  // #52: the brain resources are read from the brains table on every call.
+  assert.equal(policy.describeResource(`${RESOURCE}/later`), undefined, 'an unknown brain is no resource');
+  brainRepo.ensure('later', '/data/later');
+  assert.deepEqual(policy.describeResource(`${RESOURCE}/later`), { name: 'Engram memory' }, 'a brain created after startup is a resource at once');
+  brainRepo.archive('work');
+  assert.equal(policy.describeResource(`${RESOURCE}/work`), undefined, 'an archived brain is no longer a resource');
+  assert.equal(policy.mayUse('alice', `${RESOURCE}/work`), false, 'and gets no token');
 });

@@ -1,6 +1,6 @@
 import type { AccessPolicy } from '../../auth/index.js';
 import { brainOfResource } from '../domain/resource.js';
-import type { GrantReader } from './ports.js';
+import type { ActiveBrains, GrantReader } from './ports.js';
 
 /**
  * The OAuth server's access policy backed by grants (#6):
@@ -13,14 +13,20 @@ import type { GrantReader } from './ports.js';
  *   default brain on every request by the MCP endpoint.
  * A token already issued is checked per request by the MCP endpoint, which
  * answers 403 once the grant is gone.
+ * The protected resources are `/mcp` and `/mcp/<slug>` for every active
+ * brain, read from the brains table on every call (#52): a brain created at
+ * runtime gets tokens at once, an archived one is refused at once.
  */
 export class GrantAccessPolicy implements AccessPolicy {
-  private readonly base: string;
+  /** `base`: the bare `/mcp` resource (the default brain); `/mcp/<slug>` is brain `<slug>`. */
+  constructor(private readonly grants: GrantReader, private readonly base: string, private readonly brains: ActiveBrains) {
+    if (!base) throw new Error('GrantAccessPolicy needs the base resource');
+  }
 
-  /** `resources`: the configured protected resources; the first is `/mcp` (the default brain). */
-  constructor(private readonly grants: GrantReader, private readonly resources: readonly string[]) {
-    if (resources.length === 0) throw new Error('GrantAccessPolicy needs the configured resources');
-    this.base = resources[0]!;
+  /** The brain a resource is for, when that brain is served right now. */
+  private activeBrainOf(resource: string): string | undefined {
+    const brain = brainOfResource(resource, this.base);
+    return brain !== undefined && this.brains.isActive(brain) ? brain : undefined;
   }
 
   maySignIn(login: string): boolean {
@@ -35,13 +41,12 @@ export class GrantAccessPolicy implements AccessPolicy {
   }
 
   describeResource(resource: string): { name: string } | undefined {
-    return this.resources.includes(resource) ? { name: 'Engram memory' } : undefined;
+    return resource === this.base || this.activeBrainOf(resource) !== undefined ? { name: 'Engram memory' } : undefined;
   }
 
   mayUse(login: string, resource: string): boolean {
-    if (!this.resources.includes(resource)) return false;
     if (resource === this.base) return this.grants.grantsOf(login).length > 0;
-    const brain = brainOfResource(resource, this.base);
+    const brain = this.activeBrainOf(resource);
     return brain !== undefined && this.grants.roleOf(login, brain) !== undefined;
   }
 }
