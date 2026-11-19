@@ -310,3 +310,28 @@ test('the consent page escapes the connection name and brain slugs, and a browse
     ticket: 't&1', connection_name: '"><script>x()</script>', default_brain: 'a"b', 'role:a"b': 'writer', 'role:<i>': 'none'
   });
 });
+
+test('an archived brain (#10) is neither offered on consent nor accepted, and gives a connection no access', async t => {
+  const w = world(t);
+  const session = w.sessions.issue('owner-o').value;
+  const first = await w.authorization.begin(query(), session);
+  await w.authorization.decide(first.view.ticket, 'approve', session, { name: 'chatgpt', defaultBrain: 'alpha', roles: { alpha: 'reader', beta: 'reader' } });
+  w.db.prepare("UPDATE brains SET status = 'archived' WHERE slug = 'beta'").run();
+  assert.deepEqual(w.grants.grantsOf('owner-o').map(g => g.brain), ['alpha', 'default']);
+  const again = await w.authorization.begin(query(), session);
+  assert.deepEqual(again.view.connection.brains.map(b => b.brain), ['alpha', 'default']);
+  const refused = await w.authorization.decide(again.view.ticket, 'approve', session, { name: 'chatgpt', defaultBrain: 'beta', roles: { beta: 'reader' } });
+  assert.ok(!refused.redirect?.includes('code='), 'an archived brain cannot be chosen');
+  const id = w.connections.findOAuth('owner-o', CIMD_ID).id;
+  const access = createToolAccess(w.grants, w.connections);
+  assert.equal(access.check({ login: 'owner-o', connectionId: id }, 'beta', 'mem_search').allowed, false);
+  assert.equal(access.check({ login: 'owner-o', connectionId: id }, 'alpha', 'mem_search').allowed, true);
+});
+
+test('a disabled user (#10) has no grants to offer and its connection has no access', async t => {
+  const w = world(t);
+  const id = w.connections.saveOAuth('owner-o', CIMD_ID, { name: 'c', defaultBrain: 'alpha', brains: [{ brain: 'alpha', role: 'reader' }] });
+  w.db.prepare("UPDATE users SET status = 'disabled' WHERE github_login = 'owner-o'").run();
+  assert.deepEqual(w.grants.grantsOf('owner-o'), []);
+  assert.equal(createToolAccess(w.grants, w.connections).check({ login: 'owner-o', connectionId: id }, 'alpha', 'mem_search').allowed, false);
+});

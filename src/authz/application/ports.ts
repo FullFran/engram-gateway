@@ -14,7 +14,7 @@ export interface GrantReader {
    * activates an invite). A disabled user is refused.
    */
   admitSignIn(login: string): boolean;
-  /** Every grant of the active user, sorted by brain; empty for an unknown or inactive user. */
+  /** Every grant of the active user on a brain that is not archived, sorted by brain; empty for an unknown or inactive user. */
   grantsOf(login: string): { brain: string; role: Role }[];
 }
 

@@ -283,7 +283,10 @@ applies to the next request.
   before connections. The choice is checked again against the user's grants
   when the form is submitted; a brain without a grant or a role above the
   grant is refused and nothing is saved. Consenting again from the same
-  client updates its one connection. Names are unique per user.
+  client updates its one connection, so every token already issued to that
+  client (on any device) gets the new brains and roles on its next request.
+  Names are unique per user. Archived brains (#10) are not offered and give a
+  connection no access; a disabled user's connections have none either.
 - **Single-brain tokens.** Tokens for `/mcp/<brain>`, and tokens issued
   before connections, have no connection: they keep their user's role on
   that one brain.

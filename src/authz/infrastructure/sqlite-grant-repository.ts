@@ -58,7 +58,7 @@ export class SqliteGrantRepository implements GrantStore {
       `SELECT b.slug, g.role FROM grants g
        JOIN users u ON u.id = g.user_id
        JOIN brains b ON b.id = g.brain_id
-       WHERE u.github_login = ? AND u.status = 'active'
+       WHERE u.github_login = ? AND u.status = 'active' AND b.status = 'active'
        ORDER BY b.slug`
     ).all(login).flatMap(row => isRole(row.role) ? [{ brain: String(row.slug), role: row.role }] : []);
   }
