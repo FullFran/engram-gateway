@@ -335,10 +335,13 @@ applies to the next request.
 - **Kinds.** `oauth` connections are made on the consent page, one per user
   and OAuth client. `token` connections (code projects, CI) get their
   issuance with personal access tokens (#7).
-- **Connection tools.** On `/mcp` the client also gets four tools that act on
+- **Connection tools.** On `/mcp` the client also gets tools that act on
   its own connection (they take no routing `brain`):
-  - `brain_list`: the connection's brains, its role and the effective role on
-    each, and the default brain.
+  - `brain_list`: the connection's brains the owner still holds a grant on,
+    its role and the effective role on each, and the default brain. A brain
+    whose grant was removed or that was archived is left out (and is no
+    longer the default).
+  - `brain_resolve`: see [Brain from the git remote](#brain-from-the-git-remote).
   - `connection_brains`: the brains the owner holds a grant on, the highest
     role the connection could get there (the owner's), and the current role
     when attached.
@@ -719,11 +722,11 @@ started in a repository uses the right brain without per-repository setup.
   connection's default brain, or the `/mcp/<brain>` brain) or `none`
   (`brain: null`, no default brain). It is never a tool error. `remote` is
   the compared key, with no credentials.
-- Role: `reader` (`GATEWAY_TOOL_ROLES`). On a connection it is routed like
-  any tool: without a `brain` argument it runs on the default brain, so on
-  a connection with no default brain it needs `brain` (the hook below then
-  prints nothing). `brain_list` (see [Connections](#connections)) lists the
-  connection's brains.
+- On `/mcp` it is a connection tool, like `brain_list`: no `brain` argument,
+  and it works on a connection with no default brain (`brain: null` when
+  nothing matches). On `/mcp/<brain>` it is a `reader` tool
+  (`GATEWAY_TOOL_ROLES`). `brain_list` (see [Connections](#connections))
+  lists the connection's brains.
 
 **Claude Code SessionStart hook.**
 [`docs/examples/session-start-brain.mjs`](docs/examples/session-start-brain.mjs)

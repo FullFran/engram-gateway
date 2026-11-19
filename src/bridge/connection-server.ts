@@ -216,7 +216,9 @@ export function createConnectionServer(opts: ConnectionServerOptions): McpServer
       if (!source || !caller) return { tools: own } as never;
       // Every brain runs the same Engram, so one brain's list is the list.
       const engram = await withBrain(source, process => process.listTools());
-      const tools = gatewayTools ? mergeToolLists(engram, gatewayTools.definitions() as typeof engram) : engram;
+      const merged = gatewayTools ? mergeToolLists(engram, gatewayTools.definitions() as typeof engram) : engram;
+      // A connection tool (brain_resolve) is listed once, as a connection tool: calls go there first.
+      const tools = merged.filter(tool => !connectionTools?.tools.has(tool.name));
       const allowed = new Set(slugs.flatMap(brain => pipeline.listTools({ caller, brain }, tools).map(tool => tool.name)));
       const brainTools = tools.filter(tool => allowed.has(tool.name)).map(tool => withBrainArgument(tool, slugs, connection.defaultBrain));
       return { tools: [...brainTools, ...own] } as never;

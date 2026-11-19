@@ -69,6 +69,7 @@ export const GATEWAY_TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(
 export const CONNECTION_TOOL_KINDS: Readonly<Record<string, readonly ('oauth' | 'token')[]>> = Object.freeze(Object.assign(Object.create(null) as Record<string, readonly ('oauth' | 'token')[]>, {
   brain_list: ['oauth', 'token'],
   connection_brains: ['oauth', 'token'],
+  brain_resolve: ['oauth', 'token'],
   connection_attach: ['oauth'],
   connection_detach: ['oauth']
 }));

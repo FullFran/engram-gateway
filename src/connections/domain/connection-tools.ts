@@ -4,10 +4,11 @@ import type { Role } from '../../authz/domain/role.js';
 /**
  * The arguments of a connection tool (#27), checked before anything runs.
  * `brain` here is the brain the tool acts on (attach, detach), not a routing
- * choice; brain_list and connection_brains act on the whole connection.
+ * choice; brain_list, connection_brains and brain_resolve act on the whole
+ * connection (brain_resolve checks its own `remote` and never fails).
  */
 export type ConnectionToolArguments =
-  | { tool: 'brain_list' | 'connection_brains' }
+  | { tool: 'brain_list' | 'connection_brains' | 'brain_resolve' }
   | { tool: 'connection_attach'; brain: string; role: Role; makeDefault: boolean }
   | { tool: 'connection_detach'; brain: string };
 
@@ -22,6 +23,7 @@ export function parseConnectionTool(tool: string, args: unknown): ParsedConnecti
   switch (tool) {
     case 'brain_list':
     case 'connection_brains':
+    case 'brain_resolve':
       return { ok: true, args: { tool } };
     case 'connection_attach': {
       const { brain, role } = input;

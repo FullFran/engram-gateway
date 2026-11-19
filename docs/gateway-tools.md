@@ -37,9 +37,12 @@ connection tools (#12, #27) build on the same mechanism.
   `reader`. Maps a git remote to a brain with the `BRAIN_REMOTES` rules
   (`src/gateway-tools/application/remote-mapping.ts`: `normalizeRemote`,
   `parseRemoteMapping`, `matchRemote`), answering only with a brain the
-  caller can use: on a connection, its brains with a non-null effective role
-  (the `ConnectionAdmin.describe` view `brain_list` shows); else the call's
-  brain. Fails open to the default brain or `null`, never a tool error.
+  caller can use: on a connection, the brains the owner still holds a grant
+  on (the `ConnectionAdmin.describe` view `brain_list` shows); else the call's
+  brain. Fails open to the default brain or `null`, never a tool error. It is
+  in both tool sets: a brain tool on `/mcp/<brain>`, and a connection tool
+  (`CONNECTION_TOOL_KINDS`, no `brain` argument) on `/mcp`, where the
+  connection server lists it once.
 - **Connection tools (#27):** `brain_list`, `connection_brains`,
   `connection_attach` and `connection_detach` (`src/gateway-tools/tools/connection-tools.ts`)
   are a second tool set served only by the connection server. They act on the
