@@ -11,6 +11,6 @@ export { buildChildEnv, cloudSyncWarning } from './application/child-env.js';
 export { bootstrapBrains } from './application/bootstrap.js';
 export type { BrainsConfig } from './application/bootstrap.js';
 export { BrainCapacityError, BrainRegistry } from './application/brain-registry.js';
-export type { BrainLease, BrainRegistryOptions } from './application/brain-registry.js';
+export type { BrainLease, BrainLookup, BrainRegistryOptions } from './application/brain-registry.js';
 export { resolveBrainsConfig } from './infrastructure/env-config.js';
 export { SqliteBrainRepository } from './infrastructure/sqlite-brain-repository.js';

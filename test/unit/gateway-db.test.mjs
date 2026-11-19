@@ -60,9 +60,12 @@ test('users, brains and grants: unique logins and slugs, grants tied to both by 
   assert.throws(() => db.prepare("INSERT INTO users (github_login) VALUES ('fullfran')").run(), /UNIQUE/, 'logins are case-insensitive');
   const brain = db.prepare("INSERT INTO brains (slug, data_dir) VALUES ('personal', '/data/brains/personal')").run().lastInsertRowid;
   assert.throws(() => db.prepare("INSERT INTO brains (slug, data_dir) VALUES ('personal', '/x')").run(), /UNIQUE/);
-  const row = db.prepare('SELECT status, semantic_search_enabled FROM users, brains').get();
-  assert.deepEqual({ ...row }, { status: 'active', semantic_search_enabled: 0 });
+  const row = db.prepare('SELECT users.status, semantic_search_enabled, brains.status AS brain_status FROM users, brains').get();
+  assert.deepEqual({ ...row }, { status: 'active', semantic_search_enabled: 0, brain_status: 'active' });
   db.prepare("INSERT INTO grants (user_id, brain_id, role) VALUES (?, ?, 'owner')").run(user, brain);
+  assert.equal(db.prepare('SELECT source FROM grants').get().source, 'config', 'grants default to configuration-owned (#10)');
+  assert.throws(() => db.prepare("UPDATE grants SET source = 'other'").run(), /CHECK/);
+  assert.throws(() => db.prepare("UPDATE brains SET status = 'deleted'").run(), /CHECK/);
   assert.throws(() => db.prepare("INSERT INTO grants (user_id, brain_id, role) VALUES (?, 999, 'reader')").run(user), /FOREIGN KEY/);
   db.prepare('DELETE FROM brains WHERE id = ?').run(brain);
   assert.equal(db.prepare('SELECT count(*) AS n FROM grants').get().n, 0, 'grants go with their brain');

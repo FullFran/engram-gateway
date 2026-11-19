@@ -11,13 +11,15 @@ export interface AccessConfig {
 }
 
 /**
- * Makes users and grants match the startup configuration, the only source of
- * access until the grant management API (#10) exists:
+ * Makes the configuration-owned part of users and grants match the startup
+ * configuration:
  * - every login in `ALLOWED_GITHUB_LOGINS` is an instance admin and `owner`
  *   of every brain (so an existing single-tenant deployment keeps working);
  * - every `BRAIN_GRANTS` entry is a grant;
- * - nothing else is: an admin or grant removed from the configuration is
- *   revoked on the next start. Users rows are kept (the audit log points at them).
+ * - an admin or configured grant removed from the configuration is revoked
+ *   on the next start. Grants created through the admin API (#10) are not
+ *   configuration and survive restarts; a `BRAIN_GRANTS` entry for the same
+ *   login and brain replaces one. Users rows are kept (the audit log points at them).
  * Fails loudly, changing nothing, on an unknown brain or a grant for an admin.
  */
 export function bootstrapAccess(store: GrantStore, config: AccessConfig): void {
@@ -30,5 +32,5 @@ export function bootstrapAccess(store: GrantStore, config: AccessConfig): void {
     }
   }
   const owners: BrainGrant[] = [...admins.values()].flatMap(login => config.brains.map(brain => ({ login, brain, role: 'owner' as const })));
-  store.transaction(() => store.replaceAll({ admins: [...admins.values()], grants: [...owners, ...config.grants] }));
+  store.transaction(() => store.replaceConfigured({ admins: [...admins.values()], grants: [...owners, ...config.grants] }));
 }

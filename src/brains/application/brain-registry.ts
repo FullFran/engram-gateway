@@ -10,9 +10,18 @@ export class BrainCapacityError extends Error {
   }
 }
 
+/** Finds a servable brain by slug; a `Map` works, and so does a lookup that reads the database on every call. */
+export interface BrainLookup {
+  get(slug: string): Brain | undefined;
+}
+
 export interface BrainRegistryOptions<P extends BrainProcess> {
-  /** The brains that may be served, by slug. */
-  brains: ReadonlyMap<string, Brain>;
+  /**
+   * The brains that may be served, by slug, read on every request: a brain
+   * created or archived while the gateway runs is served or refused on the
+   * next request when this reads the `brains` table.
+   */
+  brains: BrainLookup;
   /** Builds a brain's process; it should spawn its child lazily, on first use. */
   createProcess(brain: Brain): P;
   clock: Clock;
@@ -57,7 +66,15 @@ export class BrainRegistry<P extends BrainProcess> {
 
   /** Whether `slug` is a brain this gateway serves. */
   has(slug: string): boolean {
-    return this.options.brains.has(slug);
+    return this.options.brains.get(slug) !== undefined;
+  }
+
+  /** One brain's child: `live` while it runs (or is closing), `idle` when it serves no request. */
+  status(slug: string): { live: boolean; idle: boolean } {
+    if (this.closing.has(slug)) return { live: true, idle: true };
+    const entry = this.entries.get(slug);
+    if (!entry || !entry.process.live()) return { live: false, idle: false };
+    return { live: true, idle: entry.inFlight === 0 };
   }
 
   /**
@@ -147,7 +164,7 @@ export class BrainRegistry<P extends BrainProcess> {
    * the brain's database files (restore).
    */
   async quiesce<T>(slug: string, work: () => Promise<T>): Promise<T> {
-    if (!this.options.brains.has(slug)) throw new Error(`unknown brain: ${slug}`);
+    if (!this.has(slug)) throw new Error(`unknown brain: ${slug}`);
     while (this.held.has(slug)) await this.held.get(slug);
     let release!: () => void;
     this.held.set(slug, new Promise<void>(resolve => { release = resolve; }));

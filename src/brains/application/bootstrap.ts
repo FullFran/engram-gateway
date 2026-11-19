@@ -23,8 +23,9 @@ export interface BrainsConfig {
  * Makes the `brains` table match the startup configuration without ever
  * losing anything: the default brain and every seeded slug are created when
  * missing, existing brains keep their data directory, nothing is deleted.
- * The cloud flag follows `ENGRAM_CLOUD_BRAINS` exactly (its only source until
- * the admin API exists). Fails loudly on a bad slug or an unknown cloud brain.
+ * The cloud flag follows `ENGRAM_CLOUD_BRAINS` exactly (its only source; the
+ * admin API does not set it). Brains archived through the admin API stay
+ * archived even when `BRAINS` names them. Fails loudly on a bad slug or an unknown cloud brain.
  */
 export function bootstrapBrains(repo: BrainRepository, config: BrainsConfig, logger: Logger): Brain[] {
   return repo.transaction(() => {

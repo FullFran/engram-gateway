@@ -20,6 +20,19 @@ export class SqliteBrainRepository implements BrainRepository {
     return toBrain(this.db.prepare('SELECT slug, data_dir, cloud_sync FROM brains WHERE slug = ?').get(slug)!);
   }
 
+  findActive(slug: string): Brain | undefined {
+    const row = this.db.prepare("SELECT slug, data_dir, cloud_sync FROM brains WHERE slug = ? AND status = 'active'").get(slug);
+    return row ? toBrain(row) : undefined;
+  }
+
+  exists(slug: string): boolean {
+    return this.db.prepare('SELECT 1 AS ok FROM brains WHERE slug = ?').get(slug) !== undefined;
+  }
+
+  archive(slug: string): void {
+    this.db.prepare("UPDATE brains SET status = 'archived' WHERE slug = ?").run(slug);
+  }
+
   setCloudSync(slugs: ReadonlySet<string>): void {
     const update = this.db.prepare('UPDATE brains SET cloud_sync = ? WHERE slug = ?');
     for (const brain of this.list()) update.run(slugs.has(brain.slug) ? 1 : 0, brain.slug);
