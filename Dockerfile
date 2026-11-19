@@ -40,13 +40,14 @@ RUN apk add --no-cache nodejs && \
     node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 13)) { console.error('node ' + process.versions.node + ' < 22.13'); process.exit(1); } require('node:sqlite');"
 RUN addgroup -S -g 1001 engram && \
     adduser -S -u 1001 -G engram -h /home/engram engram && \
-    mkdir -p /home/engram /app /data/gateway /data/engram && \
+    mkdir -p /home/engram /app /data/gateway /data/engram /data/brains && \
     chown -R engram:engram /home/engram /app /data && chmod 700 /data
 ENV HOME=/home/engram
 WORKDIR /app
 USER engram
 # Durable state: the gateway database (gateway.db) and generated signing
-# secret (/data/gateway, mode 0600) and Engram's database (/data/engram).
+# secret (/data/gateway, mode 0600), the default brain's Engram database
+# (/data/engram) and every other brain's (/data/brains/<brain>).
 VOLUME ["/data"]
 
 COPY --from=engram /usr/local/bin/engram /usr/local/bin/engram
@@ -66,6 +67,7 @@ ENV NODE_ENV=production \
     PORT=3000 \
     GATEWAY_DATA_DIR=/data/gateway \
     ENGRAM_DATA_DIR=/data/engram \
+    BRAINS_ROOT=/data/brains \
     ENGRAM_BIN=/usr/local/bin/engram
 LABEL org.opencontainers.image.source="https://github.com/FullFran/engram-gateway"
 LABEL org.opencontainers.image.description="engram-gateway: Engram's MCP server over Streamable HTTP behind GitHub OAuth"

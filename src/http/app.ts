@@ -4,8 +4,8 @@ import type { IncomingMessage } from 'node:http';
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
 import type { HttpRequestAuthenticator } from '../auth/index.js';
-import { MCP_AUTH_INFO_LOCAL, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
-import type { McpServerFactory } from './mcp-route.js';
+import { MCP_AUTH_INFO_LOCAL, MCP_BRAIN_LOCAL, MCP_DEFAULT_BRAIN, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
+import type { McpBrains } from './mcp-route.js';
 
 /** Service name reported on `/health`. */
 export const GATEWAY_SERVICE = 'engram-gateway';
@@ -14,7 +14,11 @@ export interface GatewayAuth {
   /** OAuth metadata, `/oauth/*` and every auth provider's own endpoints. */
   router: express.Router;
   authenticator: HttpRequestAuthenticator;
-  /** Protected resource (audience) of `/mcp`. */
+  /**
+   * Protected resource (audience) of `/mcp`, e.g. `https://memory.example.com/mcp`.
+   * Brain `<slug>` is its own resource, `${resource}/<slug>`; the default
+   * brain accepts both `${resource}` and `${resource}/default`.
+   */
   resource: string;
 }
 
@@ -24,8 +28,8 @@ export interface GatewayAppOptions {
   trustProxy: boolean | number | string;
   /** Undefined: authentication is off (loopback bind only, see `resolveAuthConfig`). */
   auth?: GatewayAuth;
-  /** The bridge's MCP server factory. */
-  mcpFactory: McpServerFactory;
+  /** The brains served at `/mcp/<slug>` (`/mcp`: the default brain), with live/idle counts for `/health/brains`. */
+  brains: McpBrains & { stats(): { live: number; idle: number } };
   logger: Logger;
 }
 
@@ -39,7 +43,7 @@ function credentialHeaders(req: IncomingMessage) {
 
 /**
  * The gateway: the auth endpoints, a minimal `/health` and the MCP endpoint
- * (`/mcp`) backed by the Engram bridge. With auth off (loopback) `/mcp` is open.
+ * (`/mcp`, `/mcp/<brain>`), one Engram bridge per brain. With auth off (loopback) it is open.
  */
 export function createGatewayApp(options: GatewayAppOptions): express.Express {
   const { auth, logger } = options;
@@ -55,7 +59,20 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
     res.status(200).json({ status: 'healthy', service: GATEWAY_SERVICE });
   });
 
+  app.get('/health/brains', (_req, res) => {
+    // Counts only: which brains exist is never shown without authentication.
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json(options.brains.stats());
+  });
+
   if (auth) app.use(auth.router);
+
+  /** Audiences a token may carry for this request's brain; the first is the canonical one. */
+  const audiences = (base: string, slug: string, bare: boolean): string[] => {
+    if (slug !== MCP_DEFAULT_BRAIN) return [`${base}/${slug}`];
+    const both = [base, `${base}/${MCP_DEFAULT_BRAIN}`];
+    return bare ? both : both.reverse();
+  };
 
   const mcpAuth: RequestHandler = async (req, res, next) => {
     if (!auth) return next();
@@ -64,7 +81,9 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
     } catch (error) {
       return next(error);
     }
-    const result = auth.authenticator.authenticate(credentialHeaders(req), { resource: [auth.resource], acceptSession: false });
+    const slug = res.locals[MCP_BRAIN_LOCAL] as string;
+    const resource = audiences(auth.resource, slug, req.path === '/');
+    const result = auth.authenticator.authenticate(credentialHeaders(req), { resource, acceptSession: false });
     if (!result.ok) {
       res.setHeader('WWW-Authenticate', result.challenge);
       res.status(result.status).json({ error: result.error });
@@ -77,14 +96,14 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
       scopes: principal.scopes,
       ...(principal.expiresAt !== undefined ? { expiresAt: principal.expiresAt } : {}),
       ...(principal.resource ? { resource: new URL(principal.resource) } : {}),
-      extra: { login: principal.login, ...(principal.provider ? { provider: principal.provider } : {}) }
+      extra: { login: principal.login, brain: slug, ...(principal.provider ? { provider: principal.provider } : {}) }
     };
     res.locals[MCP_AUTH_INFO_LOCAL] = authInfo;
     next();
   };
   // Mounted before any body parser: the SDK reads the raw body itself.
   const { router: mcpRouter } = createMcpHttpRouter({
-    factory: options.mcpFactory,
+    brains: options.brains,
     logger,
     bindHost: options.bindHost,
     ...(options.publicBaseUrl ? { publicBaseUrl: options.publicBaseUrl } : {}),

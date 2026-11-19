@@ -57,13 +57,16 @@ if (!process.env.CHECK_BRIDGE_CHILD) {
 const { createMcpHandler } = await import('@modelcontextprotocol/server');
 const { Client, StreamableHTTPClientTransport } = await import('@modelcontextprotocol/client');
 const { createEngramBridge } = await import('../dist/bridge/index.js');
+const { buildChildEnv } = await import('../dist/brains/index.js');
+// The child gets an allowlisted env only, as the gateway builds it for a brain.
+const childEnv = buildChildEnv({ slug: 'bridge-e2e', dataDir: process.env.ENGRAM_DATA_DIR, cloudSync: false }, process.env);
 
 const logger = Object.fromEntries(['debug', 'info', 'warn', 'error'].map(level => [level, (message, fields) => {
   if (level !== 'debug') console.error(JSON.stringify({ level, message, ...fields }));
 }]));
 
 async function withBridge(fn, clientOptions) {
-  const bridge = createEngramBridge({ command: ENGRAM_BIN, args: ['mcp', '--project', project], logger });
+  const bridge = createEngramBridge({ command: ENGRAM_BIN, args: ['mcp', '--project', project], env: childEnv, logger });
   await bridge.start();
   const handler = createMcpHandler(bridge.factory);
   const transport = new StreamableHTTPClientTransport(new URL('http://localhost/mcp'), {

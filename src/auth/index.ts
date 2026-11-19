@@ -5,6 +5,7 @@
  * open comes in through the `AccessPolicy` port.
  */
 import express from 'express';
+import type { DatabaseSync } from 'node:sqlite';
 import { StaticAccessPolicy } from './application/identity.js';
 import type { AccessPolicy } from './application/identity.js';
 import type { AuthSettings } from './application/settings.js';
@@ -48,6 +49,8 @@ export interface AuthDeps {
   resourceName?: string;
   /** Who may sign in and which resources exist; default: `ALLOWED_GITHUB_LOGINS` and the configured resources. */
   policy?: AccessPolicy;
+  /** The gateway database, opened (and closed) by the caller; default: opens `config.dbPath`. */
+  db?: DatabaseSync;
 }
 
 /** Without the GitHub provider there is no OAuth discovery to point at. */
@@ -61,7 +64,7 @@ export function buildAuth(config: AuthOnConfig, deps: AuthDeps): AuthModule {
   const random = cryptoRandom;
   const cookies = new CookieJar(config.secureCookies);
   const policy = deps.policy ?? new StaticAccessPolicy(settings);
-  const db = openGatewayDatabase(config.dbPath);
+  const db = deps.db ?? openGatewayDatabase(config.dbPath);
   if (config.jsonStorePath) {
     const imported = importJsonTokenStore(db, config.jsonStorePath);
     if (imported.status === 'imported') deps.logger.info('Imported the JSON auth store into the gateway database', { from: config.jsonStorePath, movedTo: imported.renamedTo, ...imported.counts });

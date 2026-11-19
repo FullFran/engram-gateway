@@ -15,11 +15,16 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
 
 ## How it works
 
-- **Bridge.** One long-lived `engram mcp` child process. Every MCP session on
-  `/mcp` gets a server that forwards `tools/list` and `tools/call` to it
-  verbatim (schemas, `isError`, `structuredContent`). If the child dies, the
-  next request restarts it. Both the 2026-07-28 protocol and the legacy
-  `initialize` handshake are served.
+- **Brains.** A brain is one Engram data directory: one `engram.db`, served
+  by its own `engram mcp` child at `/mcp/<brain>` (`/mcp` is the `default`
+  brain). Isolation comes from the file, never from Engram's `project`
+  parameter. See [Brains](#brains).
+- **Bridge.** Every MCP request on a brain's path gets a server that forwards
+  `tools/list` and `tools/call` (through the tool-call pipeline below) to
+  that brain's child (schemas, `isError`, `structuredContent`). A child starts on its brain's first
+  request, stops after `BRAIN_IDLE_TIMEOUT` without requests, and is
+  restarted by the next request if it dies. Both the 2026-07-28 protocol and
+  the legacy `initialize` handshake are served.
 - **Tool-call pipeline.** Every `tools/call` runs through the same stages,
   in order: authorize → redact → forward to Engram → audit → wrap result.
   Authorize and audit are pass-through placeholders for now (roles and
@@ -77,14 +82,17 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
    | `ALLOWED_GITHUB_LOGINS` | yes | Comma-separated GitHub logins allowed in |
    | `GITHUB_APP_NAME` | no | Name shown on the sign-in page |
    | `ENGRAM_PROJECT` | no | Default Engram project for this memory |
-   | `ENGRAM_CLOUD_SERVER`, `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_AUTOSYNC` | no | Passed to `engram`, for Engram Cloud sync |
+   | `BRAINS` | no | Extra brains to create, e.g. `work,notes` (see [Brains](#brains)) |
+   | `ENGRAM_CLOUD_SERVER`, `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_AUTOSYNC` | no | Engram Cloud sync settings, passed only to the brains in `ENGRAM_CLOUD_BRAINS` |
+   | `ENGRAM_CLOUD_BRAINS` | no | Brains that sync to Engram Cloud, e.g. `default` (none by default) |
 
-   State lives in the `/data` volume: `/data/engram` (Engram's database) and
-   `/data/gateway` (the gateway database `gateway.db` with clients and hashed
-   tokens, and the session-signing secret, which is generated on first start;
-   both mode 0600).
-3. Add `https://<your-host>/mcp` as a remote MCP server in your client and
-   sign in with GitHub when asked.
+   State lives in the `/data` volume: `/data/engram` (the default brain's
+   Engram database), `/data/brains/<brain>` (every other brain) and
+   `/data/gateway` (the gateway database `gateway.db` with clients, hashed
+   tokens and the brains table, and the session-signing secret, which is
+   generated on first start; both mode 0600).
+3. Add `https://<your-host>/mcp` (or `https://<your-host>/mcp/<brain>`) as a
+   remote MCP server in your client and sign in with GitHub when asked.
 
 ### Other settings
 
@@ -95,22 +103,108 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
 | `TRUST_PROXY` | unset | Express `trust proxy` (set `1` behind one reverse proxy) |
 | `ENGRAM_BIN` | `engram` | Engram binary |
 | `ENGRAM_ARGS` | `mcp` | Arguments for the child, e.g. `mcp --tools=agent` |
-| `ENGRAM_DATA_DIR` | Engram's default | Engram's data directory |
+| `ENGRAM_DATA_DIR` | Engram's default (`~/.engram`) | Data directory of the `default` brain when it is first created (the image sets `/data/engram`) |
+| `BRAINS_ROOT` | unset | Absolute directory holding `<brain>/` data directories (the image sets `/data/brains`); required by `BRAINS` |
+| `BRAINS` | unset | Comma-separated brain slugs created at startup when missing |
+| `ENGRAM_CLOUD_BRAINS` | unset | Brains whose child gets the `ENGRAM_CLOUD_*` variables |
+| `BRAIN_IDLE_TIMEOUT` | `600` | Seconds without requests before a brain's child stops |
+| `MAX_LIVE_BRAINS` | `10` | Most `engram mcp` children at once; the least recently used idle one makes room |
 | `GATEWAY_DATA_DIR` | required when auth is on | Auth state directory (the image sets `/data/gateway`) |
-| `GATEWAY_DB_PATH` | `$GATEWAY_DATA_DIR/gateway.db` | Gateway SQLite database; keep it on the persistent volume, never inside a brain's data directory |
+| `GATEWAY_DB_PATH` | `$GATEWAY_DATA_DIR/gateway.db` (in memory when neither is set and auth is off) | Gateway SQLite database; keep it on the persistent volume, never inside a brain's data directory |
 | `AUTH_ACCESS_TOKEN_TTL_SECONDS`, `AUTH_REFRESH_TOKEN_TTL_SECONDS`, `AUTH_SESSION_TTL_SECONDS` | 1 h, 30 d, 7 d | Token and sign-in session lifetimes |
 | `GITHUB_CLIENT_SECRET` / `GITHUB_CLIENT_SECRET_FILE` | unset | Only for the web (redirect) flow instead of device flow |
 
+### Brains
+
+A brain is one data directory with its own `engram.db`, served by its own
+`engram mcp` child:
+
+```text
+/mcp           ─┐
+/mcp/default   ─┴─> default brain ── $ENGRAM_DATA_DIR (/data/engram)
+/mcp/work      ───> brain "work"  ── $BRAINS_ROOT/work (/data/brains/work)
+```
+
+- **Registry.** Brains live in the `brains` table of the gateway database.
+  On start, the `default` brain and every slug in `BRAINS` are created when
+  missing. Startup never deletes a brain and never changes an existing
+  brain's data directory (a different configured one is logged and ignored).
+  Brain management through an API comes later.
+- **Slugs.** 1-40 lowercase letters, digits or dashes, not starting with a
+  dash; `admin`, `api`, `health`, `login`, `logout`, `mcp`, `oauth`,
+  `static` and `well-known` are reserved. An invalid slug fails startup.
+- **Lifecycle.** A brain's child starts on its first request and stops after
+  `BRAIN_IDLE_TIMEOUT` seconds without requests. At most `MAX_LIVE_BRAINS`
+  children run at once: a new brain stops the least recently used idle one,
+  or waits while one is still shutting down (shutting-down children count
+  against the cap, and a brain is never started again before its previous
+  child has exited), or gets `503` when all are busy. The default brain is
+  started once at startup (so a missing `engram` fails fast), then reaped
+  like any other.
+- **Restart cooldown.** After a child fails to start or exits unexpectedly,
+  its brain is not restarted for 1 s, doubling on each further failure up to
+  30 s (a child that ran for a minute resets the backoff). Meanwhile the
+  brain answers `503` with `Retry-After`.
+  `GET /health/brains` answers `{"live": n, "idle": m}` (counts only).
+  An idle child uses about 18-30 MB of RSS (engram 3.7.2).
+- **Child environment.** A child gets `ENGRAM_DATA_DIR` (its brain),
+  `HOME`, `PATH` and `ENGRAM_PROJECT`, plus `ENGRAM_CLOUD_*` only when its
+  brain is listed in `ENGRAM_CLOUD_BRAINS`. Nothing else from the gateway's
+  environment reaches it (OAuth secrets included), apart from the non-secret
+  `LOGNAME`, `SHELL`, `TERM` and `USER` the MCP SDK always passes.
+  `ENGRAM_CLOUD_BRAINS` is the only source of the cloud flag: a brain left
+  out stops syncing on the next start.
+- **OAuth.** Each brain is its own protected resource (RFC 8707):
+  `https://<host>/mcp/<brain>`, with its metadata at
+  `/.well-known/oauth-protected-resource/mcp/<brain>`. A token issued for
+  one brain is refused by every other one. The default brain accepts tokens
+  for `/mcp` and `/mcp/default`. An unknown brain answers `404` before
+  authentication, exactly like any unknown path.
+- **Brain names are not secret.** Anyone can tell whether a brain exists: a
+  known brain answers `401` with a `WWW-Authenticate` challenge to a request
+  without a token and serves protected-resource metadata, an unknown one
+  answers `404` to both. This is accepted (slugs are low-sensitivity); do not
+  put secrets in brain names. No endpoint lists the brains.
+- **Access.** Until per-brain grants land (#6), every login in
+  `ALLOWED_GITHUB_LOGINS` is trusted on every brain: any of them can obtain a
+  token for any brain.
+
+### Upgrading to brains
+
+Existing single-brain deployments keep working: `/mcp` serves the `default`
+brain, whose data directory is the current `ENGRAM_DATA_DIR`, and tokens
+issued for `/mcp` stay valid.
+
+**Breaking change: Engram Cloud sync is now per brain and off by default.**
+The gateway no longer passes its whole environment to `engram`. To keep
+syncing the existing memory, add:
+
+```sh
+ENGRAM_CLOUD_BRAINS=default
+```
+
+When any `ENGRAM_CLOUD_*` variable is set but `ENGRAM_CLOUD_BRAINS` is empty,
+the gateway logs a warning at startup naming those variables (never their
+values). Every brain listed in `ENGRAM_CLOUD_BRAINS` gets the same
+`ENGRAM_CLOUD_*` values, so opted-in brains share one set of cloud
+credentials.
+
+Until per-brain grants land (#6), every allowed GitHub login can use every
+brain.
+
 ### Gateway database
 
-Gateway state (OAuth clients, token families, hashed tokens and codes, plus
-the users, brains and grants tables later features fill) is one SQLite file
+Gateway state (OAuth clients, token families, hashed tokens and codes, the
+brains table, plus the users and grants tables later features fill) is one SQLite file
 opened with Node's built-in `node:sqlite` (Node 22.13 or later; the image
 ships Node 24), in WAL mode with foreign keys on and a 5 s busy timeout, so
 two gateways can share it during a deploy. The schema is versioned with
 `PRAGMA user_version`; the ordered files in `src/shared/gateway-migrations/`
 are applied on start, each in one transaction. A database newer than the
-running gateway is refused.
+running gateway is refused. WAL needs a local filesystem (no NFS or other
+network shares), so every gateway replica sharing the file must run on the
+same host. The database is closed on shutdown, after every brain's child has
+stopped.
 
 Upgrading from the JSON store: on the first start with an empty database, an
 existing `$GATEWAY_DATA_DIR/auth-store.json` is imported in one transaction

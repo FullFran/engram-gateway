@@ -28,6 +28,14 @@ function unwrap(value) {
   return value;
 }
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+/** Waits until the bridge noticed its child is gone. */
+async function waitForClose(bridge) {
+  for (let i = 0; i < 100 && bridge.live(); i++) await sleep(20);
+  assert.equal(bridge.live(), false, 'the bridge saw the child exit');
+}
+
 function newBridge() {
   return createEngramBridge({ command: process.execPath, args: [FIXTURE], logger });
 }
@@ -74,13 +82,18 @@ test('tools/call is forwarded including isError and structured content', async (
   }
 });
 
-test('a child crash rejects the in-flight call and the next request reconnects', async () => {
+test('a child crash rejects the in-flight call; the next request after the cooldown reconnects', async () => {
   const bridge = newBridge();
   await bridge.start();
   try {
     const first = await connectDownstream(bridge);
     await assert.rejects(first.client.callTool({ name: 'crash', arguments: {} }));
     await first.client.close();
+    await waitForClose(bridge);
+    const wait = bridge.retryAfterMs();
+    assert.ok(wait > 0 && wait <= 1000, `an early exit starts a 1 s cooldown (got ${wait})`);
+    await assert.rejects(connectDownstream(bridge), /cooling down/);
+    await sleep(wait + 50);
     const second = await connectDownstream(bridge);
     const res = await second.client.callTool({ name: 'echo', arguments: { text: 'back' } });
     assert.deepEqual(unwrap(res.content), [{ type: 'text', text: 'back' }]);
@@ -89,6 +102,26 @@ test('a child crash rejects the in-flight call and the next request reconnects',
   } finally {
     await bridge.close();
   }
+});
+
+test('after a failed start the bridge cools down (1 s, then doubling) and does not respawn meanwhile', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'bridge-cooldown-'));
+  const spawns = join(scratch, 'spawns');
+  const script = `require('node:fs').appendFileSync(${JSON.stringify(spawns)}, 'x'); process.exit(1)`;
+  const bridge = createEngramBridge({ command: process.execPath, args: ['-e', script], logger });
+  assert.equal(bridge.retryAfterMs(), 0, 'no cooldown before any failure');
+  await assert.rejects(bridge.start());
+  const first = bridge.retryAfterMs();
+  assert.ok(first > 0 && first <= 1000, `first cooldown is 1 s (got ${first})`);
+  await assert.rejects(bridge.start(), /cooling down/);
+  assert.equal(readFileSync(spawns, 'utf8').length, 1, 'no respawn during the cooldown');
+  await sleep(first + 50);
+  await assert.rejects(bridge.start());
+  assert.equal(readFileSync(spawns, 'utf8').length, 2, 'one new attempt after the cooldown');
+  const second = bridge.retryAfterMs();
+  assert.ok(second > 1000 && second <= 2000, `second cooldown is 2 s (got ${second})`);
+  await bridge.close();
+  t.diagnostic(`scratch: ${scratch}`);
 });
 
 test('an in-flight call rejects promptly when the child dies', async () => {

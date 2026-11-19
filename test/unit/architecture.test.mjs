@@ -72,3 +72,14 @@ test('the tool-call pipeline imports only itself and Node built-ins (no SDK, aut
     }
   }
 });
+
+test('brains: domain is pure; brains never import http, auth or the bridge (main.ts wires them)', () => {
+  for (const file of files(join(src, 'brains'))) {
+    const rel = relative(src, file);
+    for (const spec of imports(file)) {
+      const to = target(file, spec);
+      if (rel.startsWith('brains/domain/')) assert.ok(to.startsWith('brains/domain/'), `${rel} imports ${spec}`);
+      for (const other of ['http/', 'auth/', 'bridge/']) assert.ok(!to.startsWith(other), `${rel} imports ${spec}`);
+    }
+  }
+});
