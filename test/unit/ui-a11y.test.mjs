@@ -42,6 +42,13 @@ test('axe: every panel page and state has no violation', async t => {
   s.reports.set('beta', { ok: false, reason: 'no_data', message: 'brain beta has no engram.db yet (nothing saved)' });
   pages['brain health'] = await call('/ui/brains/alpha', { as: 'boss' });
   pages['brain health, no data'] = await call('/ui/brains/beta', { as: 'boss' });
+  pages['users'] = await call('/ui/users', { as: 'boss' });
+  pages['users, refused'] = await call('/ui/users', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, login: 'bad login' } });
+  pages['user grants'] = await call('/ui/users/dev', { as: 'boss' });
+  pages['user grants, refused'] = await call('/ui/users/dev/grants', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, brain: 'alpha', role: 'god' } });
+  pages['user grants, an admin'] = await call('/ui/users/boss', { as: 'boss' });
+  await call('/ui/users', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, login: 'newbie' } });
+  pages['user grants, none'] = await call('/ui/users/newbie', { as: 'boss' });
   pages['not found'] = await call('/ui/nope', { as: 'dev' });
   pages['form refused'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { name: 'x' } });
   pages['signed out'] = await call('/ui/tokens', { method: 'POST', form: { name: 'x' } });
