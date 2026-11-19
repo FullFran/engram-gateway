@@ -266,6 +266,25 @@ ENGRAM_BIN=$(command -v engram) npm test   # plus e2e against a real engram
 The e2e scripts run Engram in throwaway `HOME` and data directories and strip
 every `ENGRAM_CLOUD_*` variable, so they never sync to your Engram Cloud.
 
+### Recall evaluation
+
+`eval/` replays the `mem_search` queries agents issued (from Claude Code
+transcripts) against any MCP endpoint and reports recall@5, recall@10, MRR and
+zero-result rate, with implicit labels (what the agent fetched) and judged
+labels (a pooled, blind subset judged with `eval/RUBRIC.md`). Queries and
+memory text stay in a private data directory; only aggregate numbers are
+printed.
+
+```sh
+npm run eval:build                                   # dataset from transcripts
+npm run eval:run -- --label engram-any --match-mode any --split dev \
+  --engram-data-dir /path/to/engram-copy             # score one configuration
+npm run eval:report                                  # aggregate table
+```
+
+See [docs/eval.md](docs/eval.md) for the pipeline, the holdout rule and the
+baseline numbers.
+
 ## Credits
 
 The authorization server is ported from

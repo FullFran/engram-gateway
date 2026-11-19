@@ -18,7 +18,13 @@
     "test:auth": "node scripts/check-auth.mjs",
     "test:mcp-http": "node scripts/check-mcp-http.mjs",
     "test:bridge": "node scripts/check-bridge.mjs",
-    "test": "npm run build && npm run test:unit && npm run test:auth && npm run test:mcp-http && npm run test:bridge"
+    "test": "npm run build && npm run test:unit && npm run test:auth && npm run test:mcp-http && npm run test:bridge",
+    "eval:build": "node eval/build-dataset.mjs",
+    "eval:pool": "node eval/pool.mjs",
+    "eval:judgments": "node eval/merge-judgments.mjs",
+    "eval:run": "node eval/run.mjs",
+    "eval:review": "node eval/review-sample.mjs",
+    "eval:report": "node eval/report.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.0.0",
