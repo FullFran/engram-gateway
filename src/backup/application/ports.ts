@@ -10,7 +10,7 @@ export interface DatabaseSnapshotter {
   /** Writes a consistent copy of `source` to `destination` (which must not exist). */
   snapshot(source: string, destination: string): Promise<void>;
   /** `PRAGMA integrity_check` of the file: `'ok'` when healthy. */
-  integrityCheck(path: string): string;
+  integrityCheck(path: string): Promise<string>;
 }
 
 /**

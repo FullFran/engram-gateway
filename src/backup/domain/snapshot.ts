@@ -20,13 +20,30 @@ export function formatSnapshotId(ms: number): string {
 }
 
 export function isSnapshotId(value: string): boolean {
-  return SNAPSHOT_ID_PATTERN.test(value);
+  return SNAPSHOT_ID_PATTERN.test(value) && parseSnapshotId(value) !== undefined;
 }
 
-/** The snapshots to delete so that only the newest `keep` remain. */
+/** The time a snapshot id encodes (ms since the epoch), or `undefined` when it is not a valid id. */
+export function parseSnapshotId(id: string): number | undefined {
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z$/.exec(id);
+  if (!match) return undefined;
+  const [year, month, day, hour, minute, second, ms] = match.slice(1).map(Number) as [number, number, number, number, number, number, number];
+  const time = Date.UTC(year, month - 1, day, hour, minute, second, ms);
+  return formatSnapshotId(time) === id ? time : undefined;
+}
+
+/**
+ * The snapshots to delete so that only the newest `keep` remain, by the time
+ * each id encodes. Ids are directory names, not authenticated: anyone who can
+ * write the backup directory can rename snapshots (and delete them anyway).
+ */
 export function expiredSnapshots(ids: readonly string[], keep: number): string[] {
-  const sorted = [...ids].sort();
-  return sorted.slice(0, Math.max(0, sorted.length - keep));
+  const dated = ids.flatMap(id => {
+    const time = parseSnapshotId(id);
+    return time === undefined ? [] : [{ id, time }];
+  });
+  dated.sort((a, b) => a.time - b.time);
+  return dated.slice(0, Math.max(0, dated.length - keep)).map(entry => entry.id);
 }
 
 /** Daily run time, UTC. */

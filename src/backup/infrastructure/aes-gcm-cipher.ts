@@ -89,13 +89,16 @@ export function createBackupCipher(keys: BackupKeys): BackupCipher {
       const cipher = createCipheriv('aes-256-gcm', current.key, iv);
       cipher.setAAD(head);
       const out = createWriteStream(destination, { flags: 'wx', mode: 0o600 });
+      let created = false;
+      out.once('open', () => { created = true; });
       try {
         out.write(head);
         await pipeline(createReadStream(source), cipher, out, { end: false });
         await new Promise<void>((resolve, reject) => out.end(cipher.getAuthTag(), (error?: Error | null) => (error ? reject(error) : resolve())));
       } catch (error) {
         out.destroy();
-        await rm(destination, { force: true });
+        // Only a file this call created: `wx` refuses an existing destination, which must survive.
+        if (created) await rm(destination, { force: true });
         throw error;
       }
     },
@@ -108,10 +111,13 @@ export function createBackupCipher(keys: BackupKeys): BackupCipher {
       decipher.setAAD(parsed.header);
       decipher.setAuthTag(parsed.tag);
       const body = createReadStream(source, { start: parsed.header.length, end: parsed.size - TAG_LENGTH - 1 });
+      const out = createWriteStream(destination, { flags: 'wx', mode: 0o600 });
+      let created = false;
+      out.once('open', () => { created = true; });
       try {
-        await pipeline(body, decipher, createWriteStream(destination, { flags: 'wx', mode: 0o600 }));
+        await pipeline(body, decipher, out);
       } catch (error) {
-        await rm(destination, { force: true });
+        if (created) await rm(destination, { force: true });
         const message = (error as Error).message;
         throw new Error(/authenticate/i.test(message) ? `${source} failed to authenticate: altered, truncated or wrong key` : message);
       }

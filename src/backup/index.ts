@@ -3,7 +3,7 @@
  * databases and of the gateway database, AES-256-GCM at rest, retention, and
  * restore of one brain through the brain registry's quiesce hook.
  */
-export { GATEWAY_UNIT, brainUnit, expiredSnapshots, formatSnapshotId, isSnapshotId, nextRunAt } from './domain/snapshot.js';
+export { GATEWAY_UNIT, brainUnit, expiredSnapshots, formatSnapshotId, isSnapshotId, nextRunAt, parseSnapshotId } from './domain/snapshot.js';
 export type { DailySchedule } from './domain/snapshot.js';
 export type { BackupCipher, BackupClock, DatabaseSnapshotter, QuiesceBrain } from './application/ports.js';
 export { BRAIN_DATABASES, BackupService } from './application/backup-service.js';
@@ -15,6 +15,8 @@ export { parseBackupKey, resolveBackupConfig } from './infrastructure/env-config
 export type { BackupConfig } from './infrastructure/env-config.js';
 export { startBackupSchedule } from './infrastructure/scheduler.js';
 export type { BackupSchedule } from './infrastructure/scheduler.js';
+export { BRAIN_LOCK_FILE, openBrainLock, withOfflineBrainLock } from './infrastructure/brain-lock.js';
+export type { BrainLock } from './infrastructure/brain-lock.js';
 export { callBackupControl, serveBackupControl } from './infrastructure/control-socket.js';
 export type { ControlHandlers, ControlRequest } from './infrastructure/control-socket.js';
 

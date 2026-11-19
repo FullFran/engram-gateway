@@ -7,10 +7,11 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import {
-  BackupService, callBackupControl, createBackupCipher, integrityCheck, nextRunAt, parseBackupKey, resolveBackupConfig,
-  serveBackupControl, snapshotDatabase, sqliteSnapshotter
+  BRAIN_LOCK_FILE, BackupService, callBackupControl, createBackupCipher, expiredSnapshots, integrityCheck, nextRunAt, openBrainLock,
+  parseBackupKey, parseSnapshotId, resolveBackupConfig, serveBackupControl, snapshotDatabase, sqliteSnapshotter
 } from '../../dist/backup/index.js';
 import { BrainRegistry } from '../../dist/brains/index.js';
+import { runCli } from '../../dist/cli/backup-commands.js';
 
 const scratchRoot = mkdtempSync(join(tmpdir(), 'backup-test-'));
 const scratch = name => mkdtempSync(join(scratchRoot, `${name}-`));
@@ -49,7 +50,7 @@ function steppingClock(start = Date.UTC(2026, 10, 19, 3, 0, 0)) {
   return { now: () => (now += 1000) };
 }
 
-function newService({ brains, backupDir = scratch('backups'), retention = 14, gatewayDbPath, quiesce, clock = steppingClock(), cipher } = {}) {
+function newService({ brains, backupDir = scratch('backups'), retention = 14, gatewayDbPath, quiesce, clock = steppingClock(), cipher, fs } = {}) {
   return new BackupService({
     backupDir,
     retention,
@@ -59,7 +60,8 @@ function newService({ brains, backupDir = scratch('backups'), retention = 14, ga
     quiesce: quiesce ?? ((_slug, work) => work()),
     clock,
     logger: quiet,
-    snapshotter: sqliteSnapshotter
+    snapshotter: sqliteSnapshotter,
+    ...(fs ? { fs } : {})
   });
 }
 
@@ -188,7 +190,7 @@ test('snapshot: consistent while another process writes the database (integrity_
       await new Promise(resolve => setTimeout(resolve, 30));
       const out = join(dir, `snap-${i}.db`);
       await snapshotDatabase(path, out);
-      assert.equal(integrityCheck(out), 'ok');
+      assert.equal(await integrityCheck(out), 'ok');
       const [{ sum, n, count }] = rows(out, 'SELECT (SELECT COALESCE(SUM(amount), 0) FROM ledger) AS sum, (SELECT n FROM total) AS n, (SELECT COUNT(*) FROM ledger) AS count');
       assert.equal(sum, n, 'snapshot sees whole transactions only');
       counts.push(count);
@@ -235,7 +237,7 @@ test('retention: exactly N snapshots are kept per unit, the newest ones; stale p
 
 // ---- restore ----
 
-test('restore round trip: save, back up, delete, restore, memory is back (stale WAL files removed)', async () => {
+test('restore round trip: save, back up, delete, restore, memory is back (old WAL files moved aside, not replayed)', async () => {
   const a = brainWithNotes('rt', ['remember the milk']);
   a.db.close();
   const brain = { slug: 'a', dataDir: a.dataDir, cloudSync: false };
@@ -249,6 +251,10 @@ test('restore round trip: save, back up, delete, restore, memory is back (stale 
   assert.equal(existsSync(join(a.dataDir, 'engram.db-wal')), false);
   assert.equal(existsSync(join(a.dataDir, 'engram.db-shm')), false);
   assert.deepEqual(readdirSync(a.dataDir).filter(f => f.startsWith('.restore-')), [], 'staging cleaned up');
+  const [pre] = readdirSync(a.dataDir).filter(f => f.startsWith('.pre-restore-'));
+  assert.ok(pre, 'the previous files are kept aside');
+  assert.deepEqual(readdirSync(join(a.dataDir, pre)).sort(), ['engram.db-shm', 'engram.db-wal']);
+  assert.equal(readFileSync(join(a.dataDir, pre, 'engram.db-wal'), 'utf8'), 'stale wal from the old file');
 });
 
 test('restore: the file is swapped only while the brain is quiesced', async () => {
@@ -383,4 +389,219 @@ test('gateway db path: GATEWAY_DB_PATH, else $GATEWAY_DATA_DIR/gateway.db, else 
   assert.equal(resolveGatewayDbPath({ GATEWAY_DB_PATH: ' /x/state.db ', GATEWAY_DATA_DIR: '/d' }), '/x/state.db');
   assert.equal(resolveGatewayDbPath({ GATEWAY_DATA_DIR: '/d/' }), '/d/gateway.db');
   assert.equal(resolveGatewayDbPath({}), ':memory:');
+});
+
+
+// ---- review follow-ups ----
+
+/** A separate process holding the gateway's shared lock on `dataDir` until killed. */
+async function gatewayHoldingLock(dataDir) {
+  const holder = spawn(process.execPath, ['--no-warnings', '--input-type=module', '-e', `
+    const { openBrainLock } = await import(${JSON.stringify(new URL('../../dist/backup/index.js', import.meta.url).href)});
+    openBrainLock(${JSON.stringify(dataDir)});
+    process.stdout.write('held\\n');
+    setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'pipe', 'inherit'] });
+  await new Promise(resolve => holder.stdout.once('data', resolve));
+  return holder;
+}
+
+function cliEnv(dataDir, backupDir) {
+  const keyFile = join(scratch('clikey'), 'key');
+  writeFileSync(keyFile, KEY.toString('base64'));
+  return { HOME: scratch('home'), ENGRAM_DATA_DIR: dataDir, BACKUP_DIR: backupDir, BACKUP_KEY_FILE: keyFile };
+}
+
+test('F1 CLI: with no control socket, restore refuses unless --offline; backup and list still run offline', async () => {
+  const a = brainWithNotes('cli', ['v1']);
+  a.db.close();
+  const backupDir = scratch('backups');
+  const env = cliEnv(a.dataDir, backupDir);
+  const out = [];
+  assert.equal(await runCli(['backup', 'now'], env, t => out.push(t)), 0);
+  const [id] = JSON.parse(await (async () => { const o = []; await runCli(['backup', 'list'], env, t => o.push(t)); return o.join(''); })())['brains/default'];
+  const db = new DatabaseSync(join(a.dataDir, 'engram.db'));
+  db.exec("UPDATE notes SET body = 'v2'");
+  db.close();
+  await assert.rejects(runCli(['restore', 'default', id], env, () => {}), /no running gateway.*--offline/s);
+  assert.deepEqual(rows(join(a.dataDir, 'engram.db'), 'SELECT body FROM notes').map(r => r.body), ['v2'], 'brain untouched');
+  assert.equal(await runCli(['restore', 'default', id, '--offline'], env, () => {}), 0);
+  assert.deepEqual(rows(join(a.dataDir, 'engram.db'), 'SELECT body FROM notes').map(r => r.body), ['v1']);
+});
+
+test('F1 CLI: restore --offline refuses while a gateway process holds the brain', async () => {
+  const a = brainWithNotes('cli-live', ['v1']);
+  a.db.close();
+  const backupDir = scratch('backups');
+  const env = cliEnv(a.dataDir, backupDir);
+  await runCli(['backup', 'now'], env, () => {});
+  const [id] = readdirSync(join(backupDir, 'brains', 'default'));
+  const holder = await gatewayHoldingLock(a.dataDir);
+  try {
+    await assert.rejects(runCli(['restore', 'default', id, '--offline'], env, () => {}), /gateway is running/);
+    assert.deepEqual(readdirSync(a.dataDir).filter(f => f.startsWith('.pre-restore-')), [], 'nothing moved');
+  } finally {
+    holder.kill();
+  }
+});
+
+test('F1 lock: the gateway takes the exclusive lock for a restore only when no other gateway holds the brain', async () => {
+  const dir = scratch('lock');
+  const lock = openBrainLock(dir);
+  assert.ok(existsSync(join(dir, BRAIN_LOCK_FILE)));
+  assert.equal(await lock.withExclusive(async () => 'alone'), 'alone');
+  const other = await gatewayHoldingLock(dir);
+  try {
+    await assert.rejects(lock.withExclusive(async () => 'never'), /another gateway/);
+  } finally {
+    other.kill();
+    await new Promise(resolve => other.once('exit', resolve));
+  }
+  assert.equal(await lock.withExclusive(async () => 'again'), 'again', 'shared lock was taken back after the refusal');
+  lock.close();
+});
+
+test('F1 socket: a second gateway takes the socket over without unlinking blindly; closing the old one keeps the new socket', async () => {
+  const dir = scratch('sock2');
+  const socketPath = join(dir, 'control.sock');
+  const handlers = name => ({ runAll: async () => name, listAll: () => name, restoreBrain: async () => {} });
+  const first = await serveBackupControl(socketPath, handlers('first'), quiet);
+  const second = await serveBackupControl(socketPath, handlers('second'), quiet);
+  assert.equal(await callBackupControl(socketPath, { op: 'list' }), 'second');
+  await first.close();
+  assert.equal(await callBackupControl(socketPath, { op: 'list' }), 'second', 'the old instance did not delete the live socket');
+  await second.close();
+  assert.equal(existsSync(socketPath), false, 'the owner removes its own socket');
+});
+
+test('F2 restore: an injected failure midway leaves the old brain intact', async () => {
+  const dataDir = scratch('atomic');
+  for (const [file, body] of [['engram.db', 'old engram'], ['wiki.db', 'old wiki']]) {
+    sqliteFile(join(dataDir, file), d => { d.exec('CREATE TABLE t (v TEXT)'); d.prepare('INSERT INTO t VALUES (?)').run(body); }).close();
+  }
+  const brains = [{ slug: 'a', dataDir, cloudSync: false }];
+  const backupDir = scratch('backups');
+  const { id } = (await newService({ brains, backupDir }).runAll()).taken[0];
+  for (const file of ['engram.db', 'wiki.db']) {
+    const d = new DatabaseSync(join(dataDir, file));
+    d.exec("UPDATE t SET v = 'current'");
+    d.close();
+  }
+  writeFileSync(join(dataDir, 'vectors.db'), 'not in the snapshot');
+  let placed = 0;
+  const { rename } = await import('node:fs/promises');
+  const fs = {
+    rename: async (from, to) => {
+      if (from.includes('.restore-') && ++placed === 2) throw new Error('injected failure');
+      return rename(from, to);
+    }
+  };
+  await assert.rejects(newService({ brains, backupDir, fs }).restoreBrain('a', id), /injected failure/);
+  for (const file of ['engram.db', 'wiki.db']) assert.deepEqual(rows(join(dataDir, file), 'SELECT v FROM t').map(r => r.v), ['current'], file);
+  assert.equal(readFileSync(join(dataDir, 'vectors.db'), 'utf8'), 'not in the snapshot');
+  assert.deepEqual(readdirSync(dataDir).filter(f => f.startsWith('.')), [], 'no staging or empty pre-restore dir left');
+});
+
+test('F2 restore: files absent from the snapshot are moved aside too', async () => {
+  const a = brainWithNotes('absent', ['n']);
+  a.db.close();
+  const brains = [{ slug: 'a', dataDir: a.dataDir, cloudSync: false }];
+  const service = newService({ brains });
+  const { id } = (await service.runAll()).taken[0];
+  writeFileSync(join(a.dataDir, 'vectors.db'), 'index built after the snapshot');
+  await service.restoreBrain('a', id);
+  assert.equal(existsSync(join(a.dataDir, 'vectors.db')), false);
+  const [pre] = readdirSync(a.dataDir).filter(f => f.startsWith('.pre-restore-'));
+  const aside = readdirSync(join(a.dataDir, pre));
+  for (const file of ['engram.db', 'vectors.db']) assert.ok(aside.includes(file), `${file} moved aside: ${aside}`);
+});
+
+test('F3 snapshot: the event loop keeps running while a multi-MB database is copied', async () => {
+  const dir = scratch('big');
+  const path = join(dir, 'engram.db');
+  sqliteFile(path, d => {
+    d.exec('CREATE TABLE blobs (b BLOB)');
+    const ins = d.prepare('INSERT INTO blobs VALUES (?)');
+    d.exec('BEGIN');
+    for (let i = 0; i < 1500; i++) ins.run(randomBytes(32 * 1024));
+    d.exec('COMMIT');
+  }).close();
+  let ticks = 0;
+  const timer = setInterval(() => { ticks += 1; }, 2);
+  const started = Date.now();
+  try {
+    await snapshotDatabase(path, join(dir, 'copy.db'));
+    assert.equal(await integrityCheck(join(dir, 'copy.db')), 'ok');
+  } finally {
+    clearInterval(timer);
+  }
+  const elapsed = Date.now() - started;
+  assert.ok(ticks >= Math.min(5, Math.floor(elapsed / 10)), `event loop ticked ${ticks} times in ${elapsed} ms`);
+  assert.ok(ticks >= 3, `event loop ticked ${ticks} times in ${elapsed} ms`);
+});
+
+test('F5 socket: oversized requests and idle connections are dropped; the server keeps serving', async () => {
+  const dir = scratch('sock5');
+  const socketPath = join(dir, 'control.sock');
+  const server = await serveBackupControl(socketPath, { runAll: async () => 1, listAll: () => 'ok', restoreBrain: async () => {} }, quiet, { idleTimeoutMs: 100 });
+  const { connect } = await import('node:net');
+  try {
+    const oversize = await new Promise(resolve => {
+      const s = connect(socketPath);
+      let got = '';
+      s.on('data', c => { got += c; });
+      s.on('close', () => resolve(got));
+      s.on('error', () => {});
+      s.on('connect', () => s.write('x'.repeat(10_000)));
+    });
+    assert.equal(oversize, '', 'no answer to an oversized request');
+    const idleClosed = await new Promise(resolve => {
+      const s = connect(socketPath);
+      const t = setTimeout(() => resolve(false), 2000);
+      s.on('close', () => { clearTimeout(t); resolve(true); });
+      s.on('error', () => {});
+    });
+    assert.equal(idleClosed, true, 'an idle connection is closed');
+    assert.equal(await callBackupControl(socketPath, { op: 'list' }), 'ok');
+  } finally {
+    await server.close();
+  }
+});
+
+test('F5 socket: a path longer than the Unix socket limit fails with a clear error', async () => {
+  const long = join(scratch('long'), 'x'.repeat(120), 'control.sock');
+  await assert.rejects(serveBackupControl(long, { runAll: async () => 1, listAll: () => 1, restoreBrain: async () => {} }, quiet), /socket path is too long/);
+  await assert.rejects(callBackupControl(long, { op: 'list' }), error => error.code === 'ENAMETOOLONG' && /too long/.test(error.message));
+});
+
+test('F6 startup: stale partial snapshots (plaintext) are removed in every unit', async () => {
+  const backupDir = scratch('backups');
+  for (const unit of ['brains/a', 'gateway']) {
+    mkdirSync(join(backupDir, unit, '20200101T000000000Z.partial'), { recursive: true });
+    writeFileSync(join(backupDir, unit, '20200101T000000000Z.partial', 'engram.db.plain'), 'plaintext');
+    mkdirSync(join(backupDir, unit, '20200101T000000000Z'), { recursive: true });
+  }
+  const service = newService({ brains: [{ slug: 'a', dataDir: scratch('a'), cloudSync: false }], backupDir });
+  assert.deepEqual((await service.removeStalePartials()).sort(), ['brains/a/20200101T000000000Z.partial', 'gateway/20200101T000000000Z.partial']);
+  assert.deepEqual(readdirSync(join(backupDir, 'brains', 'a')), ['20200101T000000000Z']);
+  assert.deepEqual(readdirSync(join(backupDir, 'gateway')), ['20200101T000000000Z']);
+});
+
+test('F7 cipher: a destination that already exists is refused and left untouched', async () => {
+  const dir = scratch('f7');
+  writeFileSync(join(dir, 'plain'), 'p');
+  writeFileSync(join(dir, 'existing'), 'precious');
+  const cipher = createBackupCipher({ key: KEY, previousKeys: [] });
+  await assert.rejects(cipher.encryptFile(join(dir, 'plain'), join(dir, 'existing'), 'gateway/gateway.db'), /EEXIST/);
+  assert.equal(readFileSync(join(dir, 'existing'), 'utf8'), 'precious');
+  await cipher.encryptFile(join(dir, 'plain'), join(dir, 'enc'), 'gateway/gateway.db');
+  await assert.rejects(cipher.decryptFile(join(dir, 'enc'), join(dir, 'existing'), 'gateway/gateway.db'), /EEXIST/);
+  assert.equal(readFileSync(join(dir, 'existing'), 'utf8'), 'precious');
+});
+
+test('F8 retention: ids are parsed to timestamps; expiry keeps the newest by time', () => {
+  assert.equal(parseSnapshotId('20261119T030000123Z'), Date.UTC(2026, 10, 19, 3, 0, 0, 123));
+  assert.equal(parseSnapshotId('20261319T030000123Z'), undefined, 'month 13');
+  assert.equal(parseSnapshotId('nope'), undefined);
+  assert.deepEqual(expiredSnapshots(['20261119T030000000Z', '20251119T030000000Z', '20261118T030000000Z'], 2), ['20251119T030000000Z']);
 });

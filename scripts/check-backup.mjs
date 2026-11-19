@@ -8,7 +8,9 @@
 //   - delete the memory, `restore <brain> <snapshot>` while the gateway runs:
 //     the brain's child is stopped, the file swapped, the memory is back
 //   - retention keeps exactly BACKUP_RETENTION snapshots
-//   - with the gateway stopped the CLI runs offline (list, restore, decrypt)
+//   - the socket deleted under a live gateway: restore refuses (with or
+//     without --offline: the gateway holds the brain's lock)
+//   - with the gateway stopped the CLI runs offline (list, restore --offline, decrypt)
 //   - the key never appears in any output
 // Scratch state lives outside the repository and is removed on success.
 
@@ -94,6 +96,16 @@ try {
   assertEqual(listed['brains/alpha'].length, 2, 'backup list shows the kept snapshots');
   ok('retention keeps exactly BACKUP_RETENTION=2 snapshots');
 
+  // ---- a live gateway whose socket is gone: no blind offline restore ----
+  rmSync(join(backupDir, 'control.sock'));
+  const kept = listed['brains/alpha'].at(-1);
+  const noSocket = await cli('restore', 'alpha', kept);
+  assert(noSocket.code !== 0 && noSocket.stderr.includes('--offline'), `restore without socket refuses: ${noSocket.stderr}`);
+  const forced = await cli('restore', 'alpha', kept, '--offline');
+  assert(forced.code !== 0 && forced.stderr.includes('a gateway is running'), `--offline refuses under a live gateway: ${forced.stderr}`);
+  assert((await search()).includes(`Remember ${marker}`), 'the live brain was not touched');
+  ok('socket removed under a live gateway: restore refuses, --offline refuses too (brain lock)');
+
   await gateway.stop();
 
   // ---- offline CLI ----
@@ -101,7 +113,7 @@ try {
   assert(offlineList.stderr.includes('offline'), 'list runs offline with no gateway');
   assertEqual(JSON.parse(offlineList.stdout)['brains/alpha'].length, 2, 'offline list');
   const latest = listed['brains/alpha'].at(-1);
-  const offlineRestore = await cli('restore', 'alpha', latest);
+  const offlineRestore = await cli('restore', 'alpha', latest, '--offline');
   assertEqual(offlineRestore.code, 0, `offline restore: ${offlineRestore.stderr}`);
   const restoredDb = new DatabaseSync(join(env.BRAINS_ROOT, 'alpha', 'engram.db'), { readOnly: true });
   const found = restoredDb.prepare('SELECT COUNT(*) AS n FROM observations WHERE content LIKE ?').get(`%${marker}%`).n;

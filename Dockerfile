@@ -63,6 +63,7 @@ RUN node --input-type=module -e "await import('@modelcontextprotocol/server'); a
     rm -rf /tmp/smoke && \
     node --check dist/main.js && \
     node --check dist/cli.js && \
+    node --check dist/backup/infrastructure/sqlite-worker.js && \
     engram version
 
 ENV NODE_ENV=production \

@@ -3,7 +3,8 @@ import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  BackupService, CONTROL_SOCKET_NAME, GATEWAY_UNIT, brainUnit, callBackupControl, createBackupCipher, resolveBackupConfig, sqliteSnapshotter
+  BackupService, CONTROL_SOCKET_NAME, GATEWAY_UNIT, brainUnit, callBackupControl, createBackupCipher, resolveBackupConfig, sqliteSnapshotter,
+  withOfflineBrainLock
 } from '../backup/index.js';
 import type { ControlRequest } from '../backup/index.js';
 import { DEFAULT_BRAIN, SqliteBrainRepository, resolveBrainsConfig } from '../brains/index.js';
@@ -15,7 +16,7 @@ export const USAGE = `usage:
   node dist/cli.js backup now
   node dist/cli.js backup list
   node dist/cli.js backup decrypt <file.enc> <output>
-  node dist/cli.js restore <brain> <snapshot>`;
+  node dist/cli.js restore <brain> <snapshot> [--offline]`;
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -42,7 +43,8 @@ function contextOf(file: string): string {
 }
 
 export async function runCli(argv: readonly string[], env: Env, print: (text: string) => void): Promise<number> {
-  const [group, ...rest] = argv;
+  const offline = argv.includes('--offline');
+  const [group, ...rest] = argv.filter(arg => arg !== '--offline');
   const command = group === 'backup' ? rest[0] : group;
   const args = group === 'backup' ? rest.slice(1) : rest;
   const known = group === 'backup' ? ['now', 'list', 'decrypt'] : ['restore'];
@@ -76,11 +78,19 @@ export async function runCli(argv: readonly string[], env: Env, print: (text: st
 
   let result: unknown;
   try {
+    if (offline) {
+      if (request.op !== 'restore') throw new Error('--offline only applies to restore');
+      throw Object.assign(new Error('offline requested'), { code: 'OFFLINE' });
+    }
     result = await callBackupControl(join(config.dir, CONTROL_SOCKET_NAME), request);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'ENOENT' && code !== 'ECONNREFUSED') throw error;
-    // No running gateway: nothing can hold a brain open, so run here.
+    if (code !== 'ENOENT' && code !== 'ECONNREFUSED' && code !== 'ENAMETOOLONG' && code !== 'OFFLINE') throw error;
+    // A missing socket does not prove that no gateway runs (it may have lost
+    // it): a restore runs here only on request, under the brain's lock.
+    if (request.op === 'restore' && !offline) {
+      throw new Error('no running gateway answered on the control socket. If the gateway is stopped, run: restore <brain> <snapshot> --offline (it refuses while any gateway still serves the brain)');
+    }
     const logger = createLogger(env.LOG_LEVEL);
     logger.info('No running gateway on the control socket; running offline');
     const dbPath = resolveGatewayDbPath(env);
@@ -91,7 +101,12 @@ export async function runCli(argv: readonly string[], env: Env, print: (text: st
       cipher,
       brains: () => brains,
       ...(dbPath === ':memory:' ? {} : { gatewayDbPath: dbPath }),
-      quiesce: (_slug, work) => work(),
+      // Offline: the brain's exclusive lock proves no gateway serves it.
+      quiesce: (slug, work) => {
+        const brain = brains.find(candidate => candidate.slug === slug);
+        if (!brain) throw new Error(`unknown brain: ${slug}`);
+        return withOfflineBrainLock(brain.dataDir, work);
+      },
       clock: { now: () => Date.now() },
       logger,
       snapshotter: sqliteSnapshotter

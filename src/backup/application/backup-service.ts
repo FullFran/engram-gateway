@@ -32,6 +32,8 @@ export interface BackupServiceOptions {
   clock: BackupClock;
   logger: Logger;
   snapshotter: DatabaseSnapshotter;
+  /** File renames during a restore (a seam for failure tests); defaults to `fs.rename`. */
+  fs?: { rename(from: string, to: string): Promise<void> };
 }
 
 interface Source {
@@ -48,10 +50,32 @@ interface Source {
 export class BackupService {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly snapshotter: DatabaseSnapshotter;
+  private readonly rename: (from: string, to: string) => Promise<void>;
 
   constructor(private readonly options: BackupServiceOptions) {
     if (!Number.isInteger(options.retention) || options.retention < 1) throw new Error('backup retention must be a positive integer');
     this.snapshotter = options.snapshotter;
+    this.rename = options.fs?.rename ?? rename;
+  }
+
+  /**
+   * Removes `*.partial` snapshot directories (decrypted copies left by an
+   * interrupted run) in every unit; run at startup. Returns what was removed.
+   */
+  removeStalePartials(): Promise<string[]> {
+    return this.serial(async () => {
+      const removed: string[] = [];
+      const units = [GATEWAY_UNIT, ...readdirSafe(join(this.options.backupDir, 'brains')).map(brainUnit)];
+      for (const unit of units) {
+        for (const entry of readdirSafe(join(this.options.backupDir, unit))) {
+          if (!entry.endsWith(PARTIAL_SUFFIX)) continue;
+          await rm(join(this.options.backupDir, unit, entry), { recursive: true, force: true });
+          removed.push(`${unit}/${entry}`);
+        }
+      }
+      if (removed.length > 0) this.options.logger.warn('Removed partial backup snapshots left by an interrupted run', { removed });
+      return removed;
+    });
   }
 
   /** Takes one snapshot of every unit, then applies retention. A failing unit does not stop the others. */
@@ -150,7 +174,7 @@ export class BackupService {
         const from = source.unit === GATEWAY_UNIT ? file : join(source.dir, file);
         const plain = join(partial, `${name}.plain`);
         await this.snapshotter.snapshot(from, plain);
-        const check = this.snapshotter.integrityCheck(plain);
+        const check = await this.snapshotter.integrityCheck(plain);
         if (check !== 'ok') throw new Error(`integrity_check of the copy of ${name} failed: ${check}`);
         await this.options.cipher.encryptFile(plain, join(partial, `${name}${ENCRYPTED_SUFFIX}`), `${source.unit}/${name}`);
         await rm(plain);
@@ -196,26 +220,63 @@ export class BackupService {
       for (const name of names) {
         const plain = join(staging, name);
         await this.options.cipher.decryptFile(join(snapshotDir, `${name}${ENCRYPTED_SUFFIX}`), plain, `${unit}/${name}`);
-        const check = this.snapshotter.integrityCheck(plain);
+        const check = await this.snapshotter.integrityCheck(plain);
         if (check !== 'ok') throw new Error(`snapshot ${id} of brain ${slug}: integrity_check of ${name} failed: ${check}`);
       }
-      await this.options.quiesce(slug, async () => {
-        for (const name of names) {
-          const target = join(brain.dataDir, name);
-          // A leftover WAL belongs to the old file and would be replayed onto the restored one.
-          await rm(`${target}-wal`, { force: true });
-          await rm(`${target}-shm`, { force: true });
-          await rename(join(staging, name), target);
-        }
-      });
-      this.options.logger.info('Brain restored', { brain: slug, snapshot: id, files: names });
+      const kept = await this.options.quiesce(slug, () => this.swap(brain.dataDir, staging, names));
+      this.options.logger.info('Brain restored', { brain: slug, snapshot: id, files: names, previousFiles: kept });
     } finally {
       await rm(staging, { recursive: true, force: true });
     }
   }
+
+  /**
+   * Inside the quiesced window: moves every current database file of the
+   * brain (each known database with its `-wal` and `-shm`, including those
+   * the snapshot does not have) into `.pre-restore-<time>/`, then renames the
+   * staged files in. Any error puts the previous files back. Returns the
+   * directory holding the previous files, kept for the operator to remove.
+   */
+  private async swap(dataDir: string, staging: string, names: readonly string[]): Promise<string | undefined> {
+    const aside = join(dataDir, `.pre-restore-${formatSnapshotId(this.options.clock.now())}`);
+    const moved: string[] = [];
+    const placed: string[] = [];
+    await mkdir(aside, { mode: 0o700 });
+    try {
+      for (const name of BRAIN_DATABASES) {
+        for (const file of [name, `${name}-wal`, `${name}-shm`]) {
+          if (!existsSync(join(dataDir, file))) continue;
+          await this.rename(join(dataDir, file), join(aside, file));
+          moved.push(file);
+        }
+      }
+      for (const name of names) {
+        await this.rename(join(staging, name), join(dataDir, name));
+        placed.push(name);
+      }
+    } catch (error) {
+      for (const name of placed) await rm(join(dataDir, name), { force: true });
+      for (const file of moved) await rename(join(aside, file), join(dataDir, file));
+      await rm(aside, { recursive: true, force: true });
+      throw error;
+    }
+    if (moved.length === 0) {
+      await rm(aside, { recursive: true, force: true });
+      return undefined;
+    }
+    return aside;
+  }
 }
 
 /** Complete snapshot ids in a unit directory, oldest first. */
+function readdirSafe(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
 function listIds(dir: string): string[] {
   try {
     return readdirSync(dir).filter(isSnapshotId).sort();

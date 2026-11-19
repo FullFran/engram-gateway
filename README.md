@@ -331,10 +331,15 @@ brain's `engram mcp` child (or the gateway) writes in WAL mode. Files are
 never copied byte by byte (a copy without the `-wal` file loses recent
 writes). Backing up never starts a brain's child; a brain without a database
 yet is skipped. Each copy passes `PRAGMA integrity_check` before it is
-encrypted. Layout: `$BACKUP_DIR/brains/<brain>/<snapshot>/engram.db.enc` and
+encrypted. The SQLite work runs in a worker thread, so the gateway keeps
+serving during a backup. Layout: `$BACKUP_DIR/brains/<brain>/<snapshot>/engram.db.enc` and
 `$BACKUP_DIR/gateway/<snapshot>/gateway.db.enc`, where `<snapshot>` is the
-UTC time it was taken (`YYYYMMDDTHHMMSSmmmZ`). An interrupted run leaves a
-`<snapshot>.partial` directory that the next run removes.
+UTC time it was taken (`YYYYMMDDTHHMMSSmmmZ`); retention orders snapshots by
+that time. Snapshot ids are directory names and are not authenticated (the
+file contents are). An interrupted run leaves a `<snapshot>.partial`
+directory holding unencrypted copies; the gateway removes them at startup
+and on the next run. Exclude `*.partial` from anything that syncs
+`$BACKUP_DIR` off the server.
 
 **Encryption and key.** AES-256-GCM (Node's `crypto`), a random 12-byte IV
 per file, the 16-byte authentication tag at the end. The header (format
@@ -360,12 +365,29 @@ node dist/cli.js ...`) reads the same environment as the gateway:
 node dist/cli.js backup now                      # snapshot everything now
 node dist/cli.js backup list                     # snapshots, by brain
 node dist/cli.js restore <brain> <snapshot>      # e.g. restore work 20261119T030012345Z
+node dist/cli.js restore <brain> <snapshot> --offline  # gateway stopped
 node dist/cli.js backup decrypt <file.enc> <out> # decrypt one file (manual recovery)
 ```
 
 While the gateway runs, these go through its control socket
 (`$BACKUP_DIR/control.sock`, mode 0600), so the schedule and the CLI never
-run at the same time. With no gateway running they run in the CLI process.
+run at the same time. A newer gateway takes the socket over from an older
+one (rolling deploy) and a gateway only removes its own socket on shutdown.
+With no gateway answering, `backup now` and `backup list` run in the CLI
+process; `restore` does not, unless you pass `--offline`.
+
+**Brain lock.** Every running gateway holds a shared SQLite lock on
+`<brain data dir>/.gateway.lock` (kernel file locks, released when the
+process dies). Swapping a brain's files needs the exclusive lock, so
+`restore --offline` refuses while any gateway still serves the brain, and a
+gateway refuses a restore while another gateway (e.g. mid-deploy) serves it.
+
+**Trust model.** The backup directory (0700), the socket and the lock files
+rely on filesystem permissions: anyone running as the gateway's UID (for
+example `docker exec` into the container) is trusted, as they can read the
+brains anyway. Do not share the volume with processes of another UID that
+you do not trust. Like the databases, the volume must be a local
+filesystem.
 
 **Restore runbook (one brain).**
 
@@ -373,9 +395,15 @@ run at the same time. With no gateway running they run in the CLI process.
 2. `restore <brain> <snapshot>`. Every file is decrypted and checked with
    `PRAGMA integrity_check` first; nothing changes if that fails. Then the
    brain's child is stopped through the brain registry (requests in flight
-   on that brain fail; new ones wait), stale `-wal`/`-shm` files are removed
-   and each file is renamed into place atomically. The next request starts a
-   new child on the restored data. Other brains keep serving.
+   on that brain fail; new ones wait), the brain's exclusive lock is taken,
+   every current database file (`engram.db`, `vectors.db`, `wiki.db`, each
+   with its `-wal` and `-shm`, also those the snapshot does not have) is
+   moved into `<brain data dir>/.pre-restore-<time>/`, and the restored files
+   are renamed in. Any error moves the previous files back. The next request
+   starts a new child on the restored data. Other brains keep serving.
+3. Once the restored brain looks right, delete
+   `<brain data dir>/.pre-restore-<time>/` (it holds the replaced data,
+   unencrypted).
 
 **Restore runbook (gateway database).** It holds OAuth clients, tokens and
 the brains table, and is never restored while the gateway runs:
