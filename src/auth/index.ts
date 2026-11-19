@@ -7,7 +7,7 @@
 import express from 'express';
 import type { DatabaseSync } from 'node:sqlite';
 import { StaticAccessPolicy } from './application/identity.js';
-import type { AccessPolicy } from './application/identity.js';
+import type { AccessPolicy, IdentityProvider } from './application/identity.js';
 import type { ConnectionConsent } from './application/connection-consent.js';
 import type { AuthSettings } from './application/settings.js';
 import type { Logger } from './application/ports.js';
@@ -57,6 +57,12 @@ export interface AuthDeps {
   db?: DatabaseSync;
   /** Turns grants on the multi-brain endpoint into connections (#27); default: none, every grant is a plain token. */
   connections?: ConnectionConsent;
+  /**
+   * Identity providers the composition root adds after the configured
+   * plugins, always on with auth (personal access tokens, #7). They answer
+   * bearer tokens only; they have no pages and no OAuth discovery.
+   */
+  extraProviders?: readonly IdentityProvider[];
 }
 
 /** Without the GitHub provider there is no OAuth discovery to point at. */
@@ -89,7 +95,8 @@ export function buildAuth(config: AuthOnConfig, deps: AuthDeps): AuthModule {
   const enabled = config.providers ?? (config.github ? [{ id: 'github', config: { ...config.github, allowedLogins: settings.allowedLogins } }] : []);
   const plugins: AuthPlugin[] = enabled.map(({ id, config: pluginConfig }) => AUTH_PLUGINS[id]!.build(context, pluginConfig));
   const challenge = plugins.find(plugin => plugin.challenge)?.challenge ?? plainChallenge;
-  const authenticator = new HttpRequestAuthenticator(plugins.map(plugin => plugin.provider), settings.issuer, challenge);
+  const providers = [...plugins.map(plugin => plugin.provider), ...(deps.extraProviders ?? [])];
+  const authenticator = new HttpRequestAuthenticator(providers, settings.issuer, challenge);
 
   const router = express.Router();
   // Sign-out clears every provider's session cookie (GitHub, …).
@@ -110,5 +117,5 @@ export function buildAuth(config: AuthOnConfig, deps: AuthDeps): AuthModule {
       }
     }));
   };
-  return { settings, router, authenticator, providers: plugins.map(plugin => plugin.provider.id), warmUp };
+  return { settings, router, authenticator, providers: providers.map(provider => provider.id), warmUp };
 }

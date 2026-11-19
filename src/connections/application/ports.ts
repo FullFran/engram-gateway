@@ -29,8 +29,12 @@ export interface ConnectionStore extends ConnectionReader {
    * The choice must already be checked against the owner's grants.
    */
   saveOAuth(login: string, clientId: string, choice: ConnectionChoice): number;
-  /** Creates a `token` connection (code projects, CI); issuance lands with #7. */
-  createToken(login: string, choice: ConnectionChoice): number;
+  /**
+   * Creates a `token` connection (code projects, CI; a PAT is one, #7) and
+   * returns its id. `alongside(id)` runs in the same transaction (the PAT
+   * row and its audit row), so either all of it is written or none.
+   */
+  createToken(login: string, choice: ConnectionChoice, alongside?: (connectionId: number) => void): number;
   /**
    * Attaches `brain` with `role`, or changes its role when already attached;
    * `makeDefault` also makes it the default brain. The caller has already

@@ -25,6 +25,7 @@ const SECRETS = [
   { kind: 'slack', value: 'xo' + 'xp-' + chars(30) },
   { kind: 'google', value: 'AI' + 'za' + chars(35) },
   { kind: 'npm', value: 'np' + 'm_' + chars(36) },
+  { kind: 'engram-gateway', value: 'egw' + '_pat_' + chars(43) },
   { kind: 'jwt', value: 'ey' + 'J' + chars(20) + '.ey' + 'J' + chars(30) + '.' + chars(43) },
   { kind: 'jwt', value: 'ey' + 'Jhb' + '.ey' + 'Jzd' + '.' + 'c2ln' },
   {
