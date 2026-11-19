@@ -304,18 +304,28 @@ applies to the next request.
   pipeline (authorize, redact, forward, audit, wrap) on its brain, holding
   that brain only for the call. `brain` is not forwarded to Engram.
 - **All brains at once.** `brain: "*"` runs a read tool (`mem_search`,
-  `mem_context`, `mem_search_prompts`, `mem_timeline`, `mem_list_projects`,
-  `mem_stats`) on every brain of the connection, one after the other, each
+  `mem_context`, `mem_search_prompts`, `mem_list_projects`, `mem_stats`; not
+  `mem_get_observation` nor `mem_timeline`, whose observation ids belong to
+  one brain) on every brain of the connection, one after the other, each
   through the whole pipeline (one audit row per brain). The result has a
   `brain: <slug>` text item before each brain's items and
   `structuredContent.results` with one `{ brain, structuredContent }` or
   `{ brain, error }` per brain; it is an error only when every brain failed.
   The whole call is bounded (20 s): a brain that has not answered by then is
-  reported as `timed out`, and the brains not reached yet too.
+  reported as `timed out` (its call is cancelled and the brain released), and
+  the brains not reached yet too. A brain's error is a fixed phrase
+  (`access denied`, `timed out after N ms`, `brain unavailable`,
+  `call failed`), never Engram's text. A user runs at most two `"*"` calls
+  at once; one more is a tool error to retry later.
 - **Failing closed.** A brain outside the connection, an unknown brain, a
   brain the user lost the grant on, a call without `brain` when the default
   brain was detached, or a deleted connection: an MCP error (`-32602`) with
-  the reason, never a call to Engram. Detaching a brain or revoking a grant
+  the reason, never a call to Engram. An unknown brain gets the same refusal
+  as a brain outside the connection, and both are audited as `denied`.
+- **No `default` brain needed.** The bare `/mcp` serves connections even when
+  no brain is named `default`; a token without a connection gets 403 there.
+  Engram's version and instructions (the same for every brain) are read once
+  from the first brain a connection names and then reused. Detaching a brain or revoking a grant
   applies to the next request.
 - **Audit and authorship.** The audit row of a call through a connection has
   `connectionId` in its metadata, and author attribution records the

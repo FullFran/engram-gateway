@@ -57,7 +57,8 @@ export interface EngramBridge {
   /** Engram's tools, unfiltered (the connection server filters them per brain). */
   listTools(): Promise<Tool[]>;
   /** Forwards one call to Engram as is: no pipeline (the caller runs it). */
-  callTool(call: ToolCallRequest): Promise<ToolCallResult>;
+  /** `signal` cancels the call (the child gets `notifications/cancelled`) and rejects it. */
+  callTool(call: ToolCallRequest, options?: { signal?: AbortSignal }): Promise<ToolCallResult>;
   /** Engram's version and instructions, as its `initialize` answer gave them. */
   serverInfo(): Promise<{ version: string; instructions?: string }>;
 }
@@ -227,8 +228,8 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
       } while (cursor !== undefined);
       return tools;
     },
-    async callTool(call) {
-      return (await (await upstream()).callTool(call)) as ToolCallResult;
+    async callTool(call, options) {
+      return (await (await upstream()).callTool(call, options?.signal ? { signal: options.signal } : undefined)) as ToolCallResult;
     },
     async serverInfo() {
       const client = await upstream();

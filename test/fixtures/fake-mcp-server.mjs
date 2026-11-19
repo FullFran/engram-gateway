@@ -3,7 +3,7 @@
 // FAKE_SPAWN_LOG: append one byte per start.
 // Tools: echo (ok), fail (isError), crash (exits the process), slow (never answers),
 // mem_save (returns the arguments it received, so tests can see what reached the server),
-// mem_search (returns `text` as stored memory, with structured content; FAKE_BRAIN / FAKE_SLOW_SEARCH, see below).
+// mem_search (returns `text` as stored memory, with structured content; FAKE_BRAIN / FAKE_SLOW_SEARCH / FAKE_FAIL_SEARCH, see below).
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { TOOLS } from './fake-tools.mjs';
 import { Server } from '@modelcontextprotocol/server';
@@ -24,6 +24,8 @@ const factory = () => {
     if (name === 'mem_search') {
       // FAKE_BRAIN: tags results with the brain this child serves; FAKE_SLOW_SEARCH: never answers.
       if (process.env.FAKE_SLOW_SEARCH) return new Promise(() => {});
+      // FAKE_FAIL_SEARCH: fails with a long upstream error message.
+      if (process.env.FAKE_FAIL_SEARCH) throw new Error(`upstream exploded: UPSTREAM-DETAIL ${'x'.repeat(500)}`);
       const brain = process.env.FAKE_BRAIN;
       return { content: [{ type: 'text', text: brain ? `${brain}: ${args.text}` : args.text }], structuredContent: { results: [{ id: 1, content: args.text, ...(brain ? { brain } : {}) }] } };
     }

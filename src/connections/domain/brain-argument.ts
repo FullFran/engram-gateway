@@ -11,10 +11,11 @@ export const ALL_BRAINS = '*';
 
 /**
  * Read tools whose results from several brains can be shown side by side.
- * Not `mem_get_observation`: observation ids are per brain.
+ * Not `mem_get_observation` nor `mem_timeline`: they take an observation id,
+ * and observation ids are per brain.
  */
 export const FAN_OUT_TOOLS: ReadonlySet<string> = new Set([
-  'mem_search', 'mem_context', 'mem_search_prompts', 'mem_timeline', 'mem_list_projects', 'mem_stats'
+  'mem_search', 'mem_context', 'mem_search_prompts', 'mem_list_projects', 'mem_stats'
 ]);
 
 interface ToolLike {

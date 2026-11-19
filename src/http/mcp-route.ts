@@ -206,9 +206,14 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
   // Brain names are not secret, though: a known brain answers 401 without a
   // token (and has protected-resource metadata), an unknown one 404, so anyone
   // can test whether a name exists. Accepted; see "Brains" in the README.
+  // The bare `/mcp` with a connection server also serves connections, whose
+  // brains are chosen per call: it exists even without a brain named
+  // `default`. A token without a connection then gets 404 after
+  // authentication (see `serve`).
   const selectBrain = (fixed?: string): RequestHandler => (req, res, next) => {
     const slug = fixed ?? req.params.brain ?? '';
-    if (!options.brains.has(slug)) {
+    const bareForConnections = fixed !== undefined && options.connectionServer !== undefined;
+    if (!bareForConnections && !options.brains.has(slug)) {
       res.status(404).json({ error: 'not_found' });
       return;
     }
@@ -244,6 +249,10 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
       return;
     }
     const slug = res.locals[MCP_BRAIN_LOCAL] as string;
+    if (!options.brains.has(slug)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
     let lease: Awaited<ReturnType<McpBrains['acquire']>>;
     try {
       lease = await options.brains.acquire(slug);
