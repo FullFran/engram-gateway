@@ -14,11 +14,12 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { GATEWAY_TOOL_ROLES, TOOL_ROLES, SqliteGrantRepository, bootstrapAccess, createToolAccess } from '../../dist/authz/index.js';
-import { createBrainHealthTool, createGatewayToolSet } from '../../dist/gateway-tools/index.js';
+import { CONNECTION_TOOL_KINDS } from '../../dist/authz/index.js';
+import { createBrainHealthTool, createConnectionTools, createGatewayToolSet } from '../../dist/gateway-tools/index.js';
 import { SqliteAuditLog, toolCallRecorder } from '../../dist/audit/index.js';
 import { BrainRegistry, SqliteBrainRepository } from '../../dist/brains/index.js';
 import { createConnectionServer, createEngramBridge } from '../../dist/bridge/index.js';
-import { FAN_OUT_TOOLS, SqliteConnectionStore, resolveTarget } from '../../dist/connections/index.js';
+import { ConnectionAdmin, FAN_OUT_TOOLS, SqliteConnectionStore, resolveTarget } from '../../dist/connections/index.js';
 import { createGatewayApp } from '../../dist/http/app.js';
 import { createAuditStage, createToolCallPipeline, passResult } from '../../dist/pipeline/index.js';
 import { openGatewayDatabase } from '../../dist/shared/gateway-database.js';
@@ -31,8 +32,10 @@ const ALL = ['default', 'alpha', 'beta', 'gamma', 'slow'];
 /**
  * `owner-o` is owner on alpha, beta, gamma and slow (not on default). Its
  * connection `c` has alpha (reader, the default brain) and beta (writer).
+ * `kind`: a `token` connection (default) or an `oauth` one; `tools`: serve
+ * the connection tools (brain_list, connection_*).
  */
-async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefault = true, maxFanOutsPerLogin } = {}) {
+async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefault = true, maxFanOutsPerLogin, kind = 'token', tools = false } = {}) {
   const BRAINS = withDefault ? ALL : ALL.filter(slug => slug !== 'default');
   const dir = mkdtempSync(join(tmpdir(), 'engram-gateway-connection-routing-'));
   const db = openGatewayDatabase(join(dir, 'gateway.db'));
@@ -46,7 +49,8 @@ async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefau
     brains: BRAINS
   });
   const connections = new SqliteConnectionStore(db);
-  const connectionId = connections.createToken('owner-o', { name: 'c', defaultBrain: 'alpha', brains: [{ brain: 'alpha', role: 'reader' }, { brain: 'beta', role: 'writer' }] });
+  const choice = { name: 'c', defaultBrain: 'alpha', brains: [{ brain: 'alpha', role: 'reader' }, { brain: 'beta', role: 'writer' }] };
+  const connectionId = kind === 'oauth' ? connections.saveOAuth('owner-o', 'c1', choice) : connections.createToken('owner-o', choice);
   const pipeline = createToolCallPipeline({
     access: createToolAccess(grants, connections),
     audit: createAuditStage({ record: toolCallRecorder(new SqliteAuditLog(db), { nowMs: () => Date.now() }) }),
@@ -77,7 +81,8 @@ async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefau
     connectionServer: createConnectionServer({
       brains: { has: slug => registry.has(slug), acquire: slug => { leases.push(slug); return registry.acquire(slug); } },
       connections, pipeline, gatewayTools, logger, fanOutTimeoutMs,
-      ...(maxFanOutsPerLogin !== undefined ? { maxFanOutsPerLogin } : {})
+      ...(maxFanOutsPerLogin !== undefined ? { maxFanOutsPerLogin } : {}),
+      ...(tools ? { connectionTools: connectionToolsFor(grants, connections) } : {})
     })
   });
   const server = createServer(app);
@@ -277,4 +282,94 @@ test('the bare /mcp serves connections when no brain is named default; a token w
   assert.equal(found.structuredContent.results[0].brain, 'alpha');
   delete g.principal.connectionId;
   await assert.rejects(g.connect(), error => /403|forbidden/.test(String(error)));
+});
+
+// --- connection tools (brain_list, connection_brains, connection_attach, connection_detach) ---
+
+function connectionToolsFor(grants, connections) {
+  const access = new ConnectionAdmin(grants, connections);
+  return { tools: createGatewayToolSet(createConnectionTools(access), { engram: TOOL_ROLES, gateway: CONNECTION_TOOL_KINDS }), access };
+}
+/** The test pipeline does not wrap results (`wrap: passResult`): the tool's JSON as is. */
+const json = result => JSON.parse(result.content.map(item => item.text).join(''));
+const auditRows = db => db.prepare('SELECT brain_id, target, outcome, meta_json FROM audit_log ORDER BY id').all()
+  .map(row => [row.brain_id, row.target, row.outcome, JSON.parse(row.meta_json).denyReason]);
+const attachedRows = (db, id) => db.prepare('SELECT b.slug, cb.role FROM connection_brains cb JOIN brains b ON b.id = cb.brain_id WHERE cb.connection_id = ? ORDER BY b.slug').all(id).map(row => [row.slug, row.role]);
+
+test('connection tools are listed on /mcp without a `brain` enum; a token connection only gets the read ones', async t => {
+  const oauth = await gateway(t, { kind: 'oauth', tools: true });
+  const listed = (await (await oauth.connect()).listTools()).tools;
+  const names = listed.map(tool => tool.name);
+  for (const name of ['brain_list', 'connection_brains', 'connection_attach', 'connection_detach']) assert.ok(names.includes(name), name);
+  assert.equal(brainEnum(listed.find(tool => tool.name === 'brain_list')), undefined);
+  const token = await gateway(t, { kind: 'token', tools: true });
+  const tokenNames = (await (await token.connect()).listTools()).tools.map(tool => tool.name);
+  assert.ok(tokenNames.includes('brain_list') && tokenNames.includes('connection_brains'));
+  assert.ok(!tokenNames.includes('connection_attach') && !tokenNames.includes('connection_detach'));
+});
+
+test('brain_list: the connection\'s brains with its role and the effective role; connection_brains: what the owner could attach', async t => {
+  const g = await gateway(t, { kind: 'oauth', tools: true });
+  const client = await g.connect();
+  assert.deepEqual(json(await client.callTool({ name: 'brain_list', arguments: {} })), {
+    connection: 'c', defaultBrain: 'alpha',
+    brains: [{ brain: 'alpha', role: 'reader', effectiveRole: 'reader' }, { brain: 'beta', role: 'writer', effectiveRole: 'writer' }]
+  });
+  assert.deepEqual(json(await client.callTool({ name: 'connection_brains', arguments: {} })), {
+    brains: [
+      { brain: 'alpha', maxRole: 'owner', attached: 'reader' },
+      { brain: 'beta', maxRole: 'owner', attached: 'writer' },
+      { brain: 'gamma', maxRole: 'owner' },
+      { brain: 'slow', maxRole: 'owner' }
+    ]
+  });
+});
+
+test('connection_attach adds a brain (or changes its role) and applies to the next request', async t => {
+  const g = await gateway(t, { kind: 'oauth', tools: true });
+  const client = await g.connect();
+  const attached = await client.callTool({ name: 'connection_attach', arguments: { brain: 'gamma', role: 'reader' } });
+  assert.ok(!attached.isError, JSON.stringify(attached));
+  assert.deepEqual(attachedRows(g.db, g.connectionId), [['alpha', 'reader'], ['beta', 'writer'], ['gamma', 'reader']]);
+  const search = (await client.listTools()).tools.find(tool => tool.name === 'mem_search');
+  assert.deepEqual(brainEnum(search), ['alpha', 'beta', 'gamma', '*']);
+  assert.equal((await client.callTool({ name: 'mem_search', arguments: { brain: 'gamma', text: 'x' } })).structuredContent.results[0].brain, 'gamma');
+  await client.callTool({ name: 'connection_attach', arguments: { brain: 'alpha', role: 'writer', default: true } });
+  assert.deepEqual(attachedRows(g.db, g.connectionId)[0], ['alpha', 'writer']);
+  assert.deepEqual(auditRows(g.db).filter(row => row[1] === 'connection_attach'), [['gamma', 'connection_attach', 'ok', undefined], ['alpha', 'connection_attach', 'ok', undefined]]);
+});
+
+test('connection_attach never exceeds the owner: no grant or a role above it is refused (MCP error), nothing written, audited as denied', async t => {
+  const g = await gateway(t, { kind: 'oauth', tools: true });
+  const client = await g.connect();
+  g.db.prepare("UPDATE grants SET role = 'reader' WHERE brain_id = (SELECT id FROM brains WHERE slug = 'gamma')").run();
+  const before = attachedRows(g.db, g.connectionId);
+  await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'default', role: 'reader' } }), error => deniedCall(error) && /no grant/.test(error.message));
+  await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'gamma', role: 'writer' } }), error => deniedCall(error) && /insufficient role/.test(error.message));
+  await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'beta', role: 'owner', default: 'yes' } }), deniedCall);
+  await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'gamma', role: 'admin' } }), error => deniedCall(error) && /role/.test(error.message));
+  assert.deepEqual(attachedRows(g.db, g.connectionId), before);
+  assert.deepEqual(auditRows(g.db).filter(row => row[2] === 'denied'), [['default', 'connection_attach', 'denied', 'no_grant'], ['gamma', 'connection_attach', 'denied', 'insufficient_role']]);
+});
+
+test('a token connection cannot attach or detach (MCP error, audited as denied, nothing written)', async t => {
+  const g = await gateway(t, { kind: 'token', tools: true });
+  const client = await g.connect();
+  const before = attachedRows(g.db, g.connectionId);
+  await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'gamma', role: 'reader' } }), error => deniedCall(error) && /connection kind/.test(error.message));
+  await assert.rejects(client.callTool({ name: 'connection_detach', arguments: { brain: 'beta' } }), deniedCall);
+  assert.deepEqual(attachedRows(g.db, g.connectionId), before);
+  assert.deepEqual(auditRows(g.db), [['gamma', 'connection_attach', 'denied', 'connection_kind'], ['beta', 'connection_detach', 'denied', 'connection_kind']]);
+});
+
+test('connection_detach removes a brain: gone from the next tools/list, calls to it refused; detaching the default brain leaves none', async t => {
+  const g = await gateway(t, { kind: 'oauth', tools: true });
+  const client = await g.connect();
+  assert.ok(!(await client.callTool({ name: 'connection_detach', arguments: { brain: 'beta' } })).isError);
+  assert.deepEqual(brainEnum((await client.listTools()).tools.find(tool => tool.name === 'mem_search')), ['alpha', '*']);
+  await assert.rejects(client.callTool({ name: 'mem_search', arguments: { brain: 'beta', text: 'x' } }), deniedCall);
+  assert.equal((await client.callTool({ name: 'connection_detach', arguments: { brain: 'gamma' } })).isError, true, 'not attached: a tool error');
+  await client.callTool({ name: 'connection_detach', arguments: { brain: 'alpha' } });
+  assert.equal(json(await client.callTool({ name: 'brain_list', arguments: {} })).defaultBrain, null);
+  await assert.rejects(client.callTool({ name: 'mem_search', arguments: { text: 'x' } }), error => /no default brain/.test(error.message));
 });

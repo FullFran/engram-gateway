@@ -5,7 +5,7 @@
  */
 export { ROLES, atLeast, isRole, weakerRole } from './domain/role.js';
 export type { Role } from './domain/role.js';
-export { GATEWAY_TOOL_ROLES, TOOL_ROLES, requiredRole } from './domain/tool-roles.js';
+export { CONNECTION_TOOL_KINDS, GATEWAY_TOOL_ROLES, TOOL_ROLES, requiredRole } from './domain/tool-roles.js';
 export { decideTool, effectiveRole } from './domain/decision.js';
 export type { AccessGrants, DenyReason, ToolDecision } from './domain/decision.js';
 export { isGitHubLogin } from './domain/brain-grant.js';

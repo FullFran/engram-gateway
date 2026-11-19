@@ -23,15 +23,15 @@ import { AdminService, SqliteAdminStore, createAdminRouter, fsBrainDirectories }
 import { SqliteAuthorshipRepository, createAttributor } from './attribution/index.js';
 import { ANONYMOUS_ACTOR, SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
-import { GATEWAY_TOOL_ROLES, GrantAccessPolicy, SqliteGrantRepository, bootstrapAccess, createToolAccess, parseAdminLogins, parseBrainGrants, TOOL_ROLES } from './authz/index.js';
+import { CONNECTION_TOOL_KINDS, GATEWAY_TOOL_ROLES, GrantAccessPolicy, SqliteGrantRepository, bootstrapAccess, createToolAccess, parseAdminLogins, parseBrainGrants, TOOL_ROLES } from './authz/index.js';
 import {
   BackupService, CONTROL_SOCKET_NAME, createBackupCipher, openBrainLock, resolveBackupConfig, serveBackupControl, sqliteSnapshotter, startBackupSchedule
 } from './backup/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createConnectionServer, createEngramBridge } from './bridge/index.js';
-import { ConnectionConsentService, SqliteConnectionStore } from './connections/index.js';
+import { ConnectionAdmin, ConnectionConsentService, SqliteConnectionStore } from './connections/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
-import { createBrainHealthTool, createGatewayToolSet } from './gateway-tools/index.js';
+import { createBrainHealthTool, createConnectionTools, createGatewayToolSet } from './gateway-tools/index.js';
 import { createEngramBrainHealthService } from './health/index.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
 import { createGatewayApp } from './http/app.js';
@@ -117,6 +117,9 @@ async function main(): Promise<void> {
   // read-only from each brain's engram.db, never through its child.
   const dataDirs = new Map(brains.map(brain => [brain.slug, brain.dataDir]));
   const health = createEngramBrainHealthService({ dataDirOf: slug => dataDirs.get(slug) });
+  // Connection tools (#27): checked against engram's and the gateway's names, served only on the bare /mcp.
+  const connectionAdmin = new ConnectionAdmin(grants, connections);
+  const connectionTools = createGatewayToolSet(createConnectionTools(connectionAdmin), { engram: { ...TOOL_ROLES, ...GATEWAY_TOOL_ROLES }, gateway: CONNECTION_TOOL_KINDS });
   const gatewayTools = createGatewayToolSet([createBrainHealthTool(health)], { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES });
 
   const command = process.env.ENGRAM_BIN?.trim() || 'engram';
@@ -194,7 +197,10 @@ async function main(): Promise<void> {
       auth: { router: auth.router, authenticator: auth.authenticator, resource: auth.settings.resources[0]! },
       brainAccess: { mayOpen: (login: string, brain: string) => grants.roleOf(login, brain) !== undefined },
       // Connection tokens on /mcp (#27): the brain is chosen per call.
-      connectionServer: createConnectionServer({ brains: registry, connections, pipeline, gatewayTools, logger })
+      connectionServer: createConnectionServer({
+        brains: registry, connections, pipeline, gatewayTools, logger,
+        connectionTools: { tools: connectionTools, access: connectionAdmin }
+      })
     } : {}),
     brains: registry,
     admin: {

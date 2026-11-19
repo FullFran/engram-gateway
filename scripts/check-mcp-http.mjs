@@ -521,6 +521,20 @@ async function checkConnectionRouting(github) {
     const afterDetach = await mcpCall(base, '/mcp', 'mem_search', { brain: 'beta', query: tag }, token);
     assertEqual(afterDetach.result?.error?.code, -32602, `a call to a detached brain is refused: ${afterDetach.text.slice(0, 200)}`);
     ok('detaching a brain applies to the next request (same token)');
+
+    const tools = list.result.result.tools.map(tool => tool.name);
+    assert(['brain_list', 'connection_brains', 'connection_attach', 'connection_detach'].every(name => tools.includes(name)), `connection tools listed: ${tools.join(',')}`);
+    const attached = await mcpCall(base, '/mcp', 'connection_attach', { brain: 'gamma', role: 'reader' }, token);
+    assert(attached.result?.result && !attached.result.result.isError, `connection_attach gamma: ${attached.text.slice(0, 200)}`);
+    assertEqual(JSON.stringify(enumOf(await mcpToolsList(base, '/mcp', token), 'mem_search')), '["alpha","gamma","*"]', 'an attached brain joins the list on the next request');
+    const inGamma = toolText((await mcpCall(base, '/mcp', 'mem_search', { brain: 'gamma', query: tag }, token)).result);
+    assert(inGamma.includes(`${tag} lives in gamma`), `the attached brain answers with the same token: ${inGamma.slice(0, 200)}`);
+    const writeGamma = await mcpCall(base, '/mcp', 'mem_save', { brain: 'gamma', title: 'x', content: 'x', type: 'discovery' }, token);
+    assertEqual(writeGamma.result?.error?.code, -32602, `gamma is attached as reader: ${writeGamma.text.slice(0, 200)}`);
+    const detached = await mcpCall(base, '/mcp', 'connection_detach', { brain: 'gamma' }, token);
+    assert(detached.result?.result && !detached.result.result.isError, `connection_detach gamma: ${detached.text.slice(0, 200)}`);
+    assertEqual(JSON.stringify(enumOf(await mcpToolsList(base, '/mcp', token), 'mem_search')), '["alpha","*"]', 'connection_detach applies to the next request');
+    ok('connection_attach / connection_detach from the client change its brains for the next request (same token)');
   } finally {
     await gateway.stop();
   }

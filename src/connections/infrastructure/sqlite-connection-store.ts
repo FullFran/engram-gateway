@@ -62,6 +62,30 @@ export class SqliteConnectionStore implements ConnectionStore {
     });
   }
 
+  attach(connectionId: number, brain: string, role: Role, makeDefault: boolean): void {
+    immediateTransaction(this.db, () => {
+      const changes = this.db.prepare(
+        `INSERT INTO connection_brains (connection_id, brain_id, role) SELECT ?, id, ? FROM brains WHERE slug = ?
+         ON CONFLICT (connection_id, brain_id) DO UPDATE SET role = excluded.role`
+      ).run(connectionId, role, brain).changes;
+      if (Number(changes) !== 1) throw new Error(`unknown brain ${brain}`);
+      if (makeDefault) {
+        this.db.prepare('UPDATE connections SET default_brain_id = (SELECT id FROM brains WHERE slug = ?) WHERE id = ?').run(brain, connectionId);
+      }
+    });
+  }
+
+  detach(connectionId: number, brain: string): boolean {
+    return immediateTransaction(this.db, () => {
+      const changes = this.db.prepare(
+        'DELETE FROM connection_brains WHERE connection_id = ? AND brain_id = (SELECT id FROM brains WHERE slug = ?)'
+      ).run(connectionId, brain).changes;
+      this.db.prepare('UPDATE connections SET default_brain_id = NULL WHERE id = ? AND default_brain_id = (SELECT id FROM brains WHERE slug = ?)')
+        .run(connectionId, brain);
+      return Number(changes) === 1;
+    });
+  }
+
   private userId(login: string): number {
     const row = this.db.prepare('SELECT id FROM users WHERE github_login = ?').get(login);
     if (!row) throw new Error(`unknown user ${login}`);

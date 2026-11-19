@@ -35,8 +35,8 @@ export type AuditErrorKind = 'forward_failed' | 'tool_error';
 
 /** String-valued meta keys allowed through, all ids; any other string is dropped. */
 const ID_KEYS = new Set(['observationId', 'clientId', 'errorKind', 'sessionId']);
-/** Why the authorize stage refused a call (#6). Any other value is dropped. */
-export const DENY_REASONS: ReadonlySet<string> = new Set(['no_grant', 'unknown_tool', 'insufficient_role', 'no_caller']);
+/** Why the authorize stage refused a call (#6; `connection_kind`: a connection tool its connection kind may not call, #27). Any other value is dropped. */
+export const DENY_REASONS: ReadonlySet<string> = new Set(['no_grant', 'unknown_tool', 'insufficient_role', 'no_caller', 'connection_kind']);
 const META_KEY = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const ID_VALUE = /^[A-Za-z0-9._:-]{1,128}$/;
 

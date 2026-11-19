@@ -171,7 +171,8 @@ test('every reason the access check gives is one the audit log keeps', t => {
     access.check({ login: 'alice' }, 'default', 'mem_save')
   ].map(verdict => verdict.reason);
   assert.deepEqual(reasons, ['no_caller', 'no_grant', 'unknown_tool', 'insufficient_role']);
-  assert.deepEqual([...DENY_REASONS].sort(), [...reasons].sort());
+  // `connection_kind` comes from the connection tool check (#27, src/connections), not from this access check.
+  assert.deepEqual([...DENY_REASONS].sort(), [...reasons, 'connection_kind'].sort());
 });
 
 const RESOURCE = 'https://memory.example.com/mcp';
