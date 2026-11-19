@@ -149,7 +149,11 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
       scopes: principal.scopes,
       ...(principal.expiresAt !== undefined ? { expiresAt: principal.expiresAt } : {}),
       ...(principal.resource ? { resource: new URL(principal.resource) } : {}),
-      extra: { login: principal.login, brain: slug, ...(principal.provider ? { provider: principal.provider } : {}) }
+      extra: {
+        login: principal.login, brain: slug,
+        ...(principal.provider ? { provider: principal.provider } : {}),
+        ...(principal.connectionId !== undefined ? { connectionId: principal.connectionId } : {})
+      }
     };
     res.locals[MCP_AUTH_INFO_LOCAL] = authInfo;
     next();

@@ -10,6 +10,8 @@ export interface RecordedWrite {
   observationId: number;
   syncId?: string;
   login: string;
+  /** The connection (#27) the write came through; absent for a single-brain token. */
+  connectionId?: number;
   kind: WriteKind;
   atMs: number;
 }

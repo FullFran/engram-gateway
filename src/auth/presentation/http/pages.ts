@@ -1,4 +1,10 @@
 import type { Response } from 'express';
+import type { ConnectionOffer } from '../../application/connection-consent.js';
+
+/** Form field prefix of the role picked for one brain: `role:<brain>`. */
+export const ROLE_FIELD_PREFIX = 'role:';
+/** The picker's value for a brain left out of the connection. */
+const NO_ROLE = 'none';
 
 export function escapeHtml(value: string): string {
   return value
@@ -25,6 +31,10 @@ const STYLE = `
   .user-code { display: block; font: 600 2rem/1.2 ui-monospace, monospace; letter-spacing: .12em; text-align: center; margin: 16px 0; padding: 12px; border: 1px dashed var(--border); border-radius: 8px; }
   .warning { border-left: 4px solid #d93025; padding: 8px 12px; background: color-mix(in srgb, #d93025 10%, transparent); border-radius: 4px; }
   a { color: var(--accent); }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 16px 0; padding: 8px 12px; }
+  table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 4px 6px; }
+  input[type=text], select { font: inherit; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--fg); }
+  input[type=text] { width: 100%; box-sizing: border-box; }
 `;
 
 const BASE_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'";
@@ -137,6 +147,28 @@ export interface ConsentView {
   login: string;
   resourceName: string;
   ticket: string;
+  connection?: ConnectionOffer;
+}
+
+/** The connection step (#27): a name, a role (or none) per brain and the default brain. Every value is escaped. */
+function connectionFields(offer: ConnectionOffer): string {
+  const rows = offer.brains.map(brain => {
+    const options = [NO_ROLE, ...brain.roles].map(role => {
+      const selected = (brain.selected ?? NO_ROLE) === role ? ' selected' : '';
+      return `<option value="${escapeHtml(role)}"${selected}>${escapeHtml(role)}</option>`;
+    }).join('');
+    const checked = offer.defaultBrain === brain.brain ? ' checked' : '';
+    return `<tr><td><code>${escapeHtml(brain.brain)}</code></td>` +
+      `<td><select name="${escapeHtml(`${ROLE_FIELD_PREFIX}${brain.brain}`)}" aria-label="Role on ${escapeHtml(brain.brain)}">${options}</select></td>` +
+      `<td><input type="radio" name="default_brain" value="${escapeHtml(brain.brain)}" aria-label="Default brain ${escapeHtml(brain.brain)}"${checked}></td></tr>`;
+  }).join('');
+  return `
+      <fieldset>
+        <legend>Connection</legend>
+        <p class="note">This client gets its own connection: it can use only the brains you pick, with at most the role you pick (never more than your own).</p>
+        <label>Name <input type="text" name="connection_name" value="${escapeHtml(offer.name)}" maxlength="64"></label>
+        <table><thead><tr><th>Brain</th><th>Role</th><th>Default</th></tr></thead><tbody>${rows}</tbody></table>
+      </fieldset>`;
 }
 
 export function sendConsentPage(res: Response, view: ConsentView): void {
@@ -153,11 +185,11 @@ export function sendConsentPage(res: Response, view: ConsentView): void {
       <dt>Client ID</dt><dd><code>${escapeHtml(view.clientId)}</code></dd>
       <dt>Redirects to</dt><dd><strong>${escapeHtml(redirectHost)}</strong></dd>
       <dt>Resource</dt><dd><strong>${escapeHtml(view.resourceName)}</strong></dd>
-      <dt>Access</dt><dd>${escapeHtml(view.scope)}: read and write your Engram memories</dd>
+      <dt>Access</dt><dd>${escapeHtml(view.scope)}: ${view.connection ? 'the brains and roles chosen below' : 'read and write your Engram memories'}</dd>
     </dl>
     <p class="note">${escapeHtml(nameNote)} Only approve if you started this connection yourself.</p>
     <form method="post" action="/oauth/authorize">
-      <input type="hidden" name="ticket" value="${escapeHtml(view.ticket)}">
+      <input type="hidden" name="ticket" value="${escapeHtml(view.ticket)}">${view.connection ? connectionFields(view.connection) : ''}
       <div class="actions">
         <button class="primary" type="submit" name="decision" value="approve">Approve</button>
         <button type="submit" name="decision" value="deny">Deny</button>

@@ -9,6 +9,8 @@ export interface TokenRecord {
   /** Seconds since epoch. */
   expiresAt: number;
   familyId: string;
+  /** The connection (#27) the token was issued for; absent for a single-brain token. */
+  connectionId?: number;
 }
 
 export interface RefreshTokenRecord extends TokenRecord {
@@ -27,6 +29,8 @@ export interface CodeRecord {
   expiresAt: number;
   used: boolean;
   familyId?: string;
+  /** The connection (#27) chosen on the consent screen; absent for a single-brain grant. */
+  connectionId?: number;
 }
 
 /**

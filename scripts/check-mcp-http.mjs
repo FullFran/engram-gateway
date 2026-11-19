@@ -417,6 +417,55 @@ async function checkAdmin(github) {
   }
 }
 
+async function checkConnections(github) {
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const dataDir = join(scratch, `data-${port}`);
+  const gateway = await startGateway(scratch, {
+    PORT: String(port), BRAINS_ROOT: join(scratch, `brains-${port}`), BRAINS: 'alpha',
+    ...githubEnv(port, github.url, dataDir, { BRAIN_GRANTS: 'owner-o:default:owner,owner-o:alpha:reader' })
+  });
+  const bearer = token => ({ authorization: `Bearer ${token}` });
+  const readDb = query => {
+    const db = new DatabaseSync(join(dataDir, 'gateway.db'), { readOnly: true });
+    try { return db.prepare(query).all(); } finally { db.close(); }
+  };
+  try {
+    const owner = await githubLogin(base, github, 'owner-o');
+    // --- the consent page on the bare /mcp offers the granted brains, capped at the owner's role ---
+    const offered = await obtainToken(base, owner.jar, undefined, { decision: 'deny' });
+    assert(/name="role:default"/.test(offered.page.text) && /name="role:alpha"/.test(offered.page.text), 'the picker lists every granted brain');
+    assert(!/name="role:alpha"[^>]*>(?:(?!<\/select>).)*value="writer"/s.test(offered.page.text), 'no role above the owner\'s on alpha');
+    ok('consent on /mcp shows a connection picker with the granted brains and roles up to the owner\'s');
+
+    // --- a reader connection of an owner: mem_save is an MCP error, nothing written, audited with the connection id ---
+    const reading = await obtainToken(base, owner.jar, undefined, { connection_name: 'read-only', 'role:default': 'reader' });
+    assert(reading.accessToken, `a connection token is issued: ${reading.decided?.text?.slice(0, 200)}`);
+    const [connection] = readDb("SELECT id, kind FROM connections WHERE name = 'read-only'");
+    assertEqual(connection?.kind, 'oauth', 'the connection is saved');
+    const marker = `connection-write-${Date.now()}`;
+    const denied = await mcpCall(base, '/mcp', 'mem_save', { title: marker, content: `connection wrote ${marker}`, type: 'discovery' }, bearer(reading.accessToken));
+    assertEqual(denied.result?.error?.code, -32602, `mem_save through a reader connection is an MCP error: ${denied.text.slice(0, 200)}`);
+    const read = await mcpCall(base, '/mcp', 'mem_search', { query: marker }, bearer(reading.accessToken));
+    assert(/No memories found/.test(toolText(read.result)), `nothing was saved: ${toolText(read.result).slice(0, 200)}`);
+    const audited = readDb("SELECT outcome, meta_json FROM audit_log WHERE target = 'mem_save'");
+    assertEqual(JSON.stringify(audited.map(row => [row.outcome, JSON.parse(row.meta_json).connectionId])), JSON.stringify([['denied', Number(connection.id)]]), 'the audit row carries the connection id');
+    ok('a reader connection of an owner cannot save: MCP error, engram unchanged, audit row with the connection id');
+
+    // --- the page's defaults (the owner's role on default) keep the old /mcp behaviour; /mcp/<slug> makes no connection ---
+    const owning = await obtainToken(base, owner.jar, undefined);
+    const saved = await mcpCall(base, '/mcp', 'mem_save', { title: `${marker}-o`, content: `owner wrote ${marker}`, type: 'discovery' }, bearer(owning.accessToken));
+    assert(saved.result?.result && !saved.result.result.isError, `the default connection saves: ${saved.text.slice(0, 200)}`);
+    const before = readDb('SELECT count(*) AS n FROM connections')[0].n;
+    const single = await obtainToken(base, owner.jar, `${base}/mcp/alpha`);
+    assertEqual((await mcpToolsList(base, '/mcp/alpha', bearer(single.accessToken))).status, 200, 'a single-brain token still works');
+    assertEqual(readDb('SELECT count(*) AS n FROM connections')[0].n, before, 'no connection for /mcp/<slug>');
+    ok('approving the page as shown keeps the owner\'s access on /mcp; /mcp/<slug> tokens stay single-brain');
+  } finally {
+    await gateway.stop();
+  }
+}
+
 const github = await startFakeGitHub();
 try {
   console.log(`MCP HTTP checks (scratch: ${scratch})`);
@@ -427,6 +476,7 @@ try {
   await checkBrainAudiences(github);
   await checkRoles(github);
   await checkAdmin(github);
+  await checkConnections(github);
   console.log(`MCP HTTP check passed: ${passed} groups.`);
 } catch (error) {
   console.error(`MCP HTTP check failed after ${passed} passing groups: ${error.stack || error.message}`);

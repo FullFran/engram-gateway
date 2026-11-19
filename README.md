@@ -244,10 +244,10 @@ Engram release cannot add an unreviewed tool.
 - **Auth off.** On a loopback bind without authentication there is no
   caller, so roles do not apply: every tool is allowed (and `BRAIN_GRANTS`
   is ignored with a warning).
-- **Clients (#27).** The role decision is a pure function of the user's
-  grant and the client connection's role on the brain
-  (`src/authz/domain/decision.ts`); the effective role is the weaker of the
-  two. Connections are not modelled yet, so a client has its user's role.
+- **Connections (#27).** See [Connections](#connections): a client
+  connected on `/mcp` gets its own role per brain, and the effective role is
+  the weaker of the user's grant and the connection's role
+  (`src/authz/domain/decision.ts`).
 - **A brain is the boundary, not a project.** Engram `project`s inside one
   brain share its database: a role on the brain applies to every project in
   it, and nothing stops a caller from reading or writing another project.
@@ -263,6 +263,42 @@ Engram release cannot add an unreviewed tool.
   gateway removes both from every tool call before forwarding (any role,
   auth on or off), so `mem_current_project` and friends report the brain's
   own project, and the audit row counts them as `hostPathArguments`.
+
+### Connections
+
+A connection is a named client credential owned by a user (stored in the
+`connections` and `connection_brains` tables of the gateway database). It
+lists the brains the client may use, with the connection's own role on each,
+and a default brain. A connection never exceeds its owner: the effective role
+on a brain is the weaker of the user's grant and the connection's role, read
+on every call, so revoking the user's grant (or deleting the connection)
+applies to the next request.
+
+- **Consent on `/mcp`.** Authorizing a client for the bare `/mcp` resource
+  (ChatGPT, Claude.ai) shows a connection step on the consent page: a name,
+  a role (or `none`) for each brain the user holds a grant on, offering only
+  roles up to the user's own, and the default brain. The page preselects the
+  client's existing connection, or else the `default` brain (or the first
+  granted brain) at the user's role, which is what a `/mcp` token opened
+  before connections. The choice is checked again against the user's grants
+  when the form is submitted; a brain without a grant or a role above the
+  grant is refused and nothing is saved. Consenting again from the same
+  client updates its one connection. Names are unique per user.
+- **Single-brain tokens.** Tokens for `/mcp/<brain>`, and tokens issued
+  before connections, have no connection: they keep their user's role on
+  that one brain.
+- **Tokens and refreshes** carry the connection id; a refreshed token keeps
+  it.
+- **Routing.** For now a connection token on `/mcp` serves the `default`
+  brain, at the connection's role there (no role there: every tool is
+  refused). Choosing a brain per call follows in the next change.
+- **Audit and authorship.** The audit row of a call through a connection has
+  `connectionId` in its metadata, and author attribution records the
+  connection of the first and the last write
+  (`observation_authors.connection_id`, `last_connection_id`).
+- **Kinds.** `oauth` connections are made on the consent page, one per user
+  and OAuth client. `token` connections (code projects, CI) get their
+  issuance with personal access tokens (#7).
 
 ### Gateway database
 

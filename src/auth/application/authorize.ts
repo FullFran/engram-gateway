@@ -11,6 +11,7 @@ import type { Clock, RandomSource, TicketSigner, TokenStore } from './ports.js';
 import { nowSeconds } from './ports.js';
 import { StaticAccessPolicy, selectResource } from './identity.js';
 import type { AccessPolicy } from './identity.js';
+import type { ConnectionAnswer, ConnectionConsent, ConnectionOffer } from './connection-consent.js';
 
 const CONSENT_PURPOSE = 'consent';
 const CONSENT_TTL_SECONDS = 600;
@@ -36,6 +37,8 @@ export interface ConsentView {
   /** What the token will open (the memory), as the consent page names it. */
   resourceName: string;
   ticket: string;
+  /** For the endpoint that serves several brains: which brains, roles and default the connection gets (#27). */
+  connection?: ConnectionOffer;
 }
 
 /** Redirect to the client; RFC 9207 `iss` is always included. */
@@ -65,6 +68,9 @@ interface ConsentTicket extends Record<string, unknown> {
   state: string | null;
   sid: string;
   login: string;
+  /** The answer must carry the connection's brains (#27). */
+  connection?: true;
+  clientName?: string;
 }
 
 function errorPage(status: number, title: string, message: string): ErrorPage {
@@ -84,7 +90,9 @@ export class AuthorizationService {
     private readonly random: RandomSource,
     private readonly clock: Clock,
     private readonly store: TokenStore,
-    private readonly policy: AccessPolicy = new StaticAccessPolicy(settings)
+    private readonly policy: AccessPolicy = new StaticAccessPolicy(settings),
+    /** Turns a grant on the multi-brain endpoint into a connection (#27); absent: every grant is a plain token. */
+    private readonly connections?: ConnectionConsent
   ) {}
 
   redirect(redirectUri: string, params: Record<string, string | undefined>): ClientRedirect {
@@ -124,7 +132,11 @@ export class AuthorizationService {
     if (!this.policy.mayUse(session.login, resource.resource)) {
       return errorPage(403, 'No access', `The GitHub account ${session.login} is not allowed to use this Engram memory.`);
     }
+    const consentClient = { clientId: client.clientId, ...(client.clientName ? { clientName: client.clientName } : {}) };
+    const connection = this.connections?.offer(session.login, resource.resource, consentClient);
     const ticket = this.signer.sign(CONSENT_PURPOSE, {
+      ...(connection ? { connection: true as const } : {}),
+      ...(client.clientName ? { clientName: client.clientName } : {}),
       tid: this.random.token(16),
       clientId: client.clientId,
       redirectUri,
@@ -145,13 +157,17 @@ export class AuthorizationService {
         scope: MEMORY_SCOPE,
         login: session.login,
         resourceName: this.policy.describeResource(resource.resource)?.name ?? resource.resource,
-        ticket
+        ticket,
+        ...(connection ? { connection } : {})
       }
     };
   }
 
-  /** The consent form answer. The ticket is single use, whatever the decision. */
-  async decide(ticketValue: string | undefined, decision: string | undefined, sessionValue: string | undefined): Promise<DecideResult> {
+  /**
+   * The consent form answer. The ticket is single use, whatever the decision.
+   * `answer`: the connection's brains, for a grant on the multi-brain endpoint (#27).
+   */
+  async decide(ticketValue: string | undefined, decision: string | undefined, sessionValue: string | undefined, answer?: ConnectionAnswer): Promise<DecideResult> {
     const session = this.sessions.read(sessionValue);
     const ticket = this.signer.verify<ConsentTicket>(CONSENT_PURPOSE, ticketValue);
     if (!session || !ticket || typeof ticket.tid !== 'string' || ticket.sid !== session.sid || ticket.login !== session.login) {
@@ -181,7 +197,19 @@ export class AuthorizationService {
     if (decision !== 'approve') {
       return this.redirect(ticket.redirectUri, { error: 'access_denied', error_description: 'the user denied access', state });
     }
+    let connectionId: number | undefined;
+    if (ticket.connection) {
+      // Checked against the person's grants as they are now, not as the page showed them.
+      const accepted = this.connections?.accept(session.login, ticket.resource, {
+        clientId: client.clientId, ...(ticket.clientName ? { clientName: ticket.clientName } : {})
+      }, answer ?? { name: undefined, defaultBrain: undefined, roles: {} });
+      if (!accepted?.ok) {
+        return errorPage(400, 'Connection not saved', `${accepted?.message ?? 'Connections are not available.'} Start again from the application.`);
+      }
+      connectionId = accepted.connectionId;
+    }
     const code = this.codes.issue({
+      ...(connectionId !== undefined ? { connectionId } : {}),
       clientId: client.clientId,
       redirectUri: ticket.redirectUri,
       codeChallenge: ticket.codeChallenge,

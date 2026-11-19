@@ -85,7 +85,7 @@ export class TokenService {
       }
       // The family was fixed when the code burnt: a replay elsewhere may already have revoked it.
       const familyId = this.store.createFamily(nowSeconds(this.clock) + this.settings.refreshTokenTtlSeconds, record.familyId);
-      return { ok: true, body: this.issue(client.clientId, record.login, record.scope, record.resource, familyId) };
+      return { ok: true, body: this.issue(client.clientId, record.login, record.scope, record.resource, familyId, record.connectionId) };
     }
 
     if (request.grantType === 'refresh_token') {
@@ -107,17 +107,19 @@ export class TokenService {
         this.logger.warn('Refresh token reused; revoked its token family', { clientId: client.clientId });
         return fail(400, 'invalid_grant', 'refresh token already used');
       }
-      return { ok: true, body: this.issue(client.clientId, record.login, record.scope, record.resource, record.familyId) };
+      return { ok: true, body: this.issue(client.clientId, record.login, record.scope, record.resource, record.familyId, record.connectionId) };
     }
     return fail(400, 'unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
   }
 
-  private issue(clientId: string, login: string, scope: string, resource: string, familyId: string): Record<string, unknown> {
+  /** `connectionId`: the connection (#27) the grant was for; refreshes keep it. */
+  private issue(clientId: string, login: string, scope: string, resource: string, familyId: string, connectionId?: number): Record<string, unknown> {
     const accessToken = this.random.token(32);
     const refreshToken = this.random.token(32);
     const now = nowSeconds(this.clock);
-    const accessRecord: TokenRecord = { clientId, login, scope, resource, familyId, expiresAt: now + this.settings.accessTokenTtlSeconds };
-    const refreshRecord: RefreshTokenRecord = { clientId, login, scope, resource, familyId, expiresAt: now + this.settings.refreshTokenTtlSeconds };
+    const connection = connectionId !== undefined ? { connectionId } : {};
+    const accessRecord: TokenRecord = { clientId, login, scope, resource, familyId, expiresAt: now + this.settings.accessTokenTtlSeconds, ...connection };
+    const refreshRecord: RefreshTokenRecord = { clientId, login, scope, resource, familyId, expiresAt: now + this.settings.refreshTokenTtlSeconds, ...connection };
     this.store.extendFamily(familyId, refreshRecord.expiresAt);
     this.store.putTokens(
       { hash: this.hasher.sha256Hex(accessToken), record: accessRecord },

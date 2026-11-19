@@ -66,7 +66,12 @@ const STABLE_UPTIME_MS = 60_000;
 function callerOf(authInfo: { clientId?: string; extra?: Record<string, unknown> } | undefined): ToolCaller | undefined {
   if (!authInfo) return undefined;
   const login = authInfo.extra?.login;
-  return { ...(typeof login === 'string' ? { login } : {}), ...(authInfo.clientId ? { clientId: authInfo.clientId } : {}) };
+  const connectionId = authInfo.extra?.connectionId;
+  return {
+    ...(typeof login === 'string' ? { login } : {}),
+    ...(authInfo.clientId ? { clientId: authInfo.clientId } : {}),
+    ...(typeof connectionId === 'number' ? { connectionId } : {})
+  };
 }
 
 /** The pipeline's view of the call, as a gateway tool sees it: brain, caller and the role authorize decided. */

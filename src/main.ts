@@ -29,6 +29,7 @@ import {
 } from './backup/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createEngramBridge } from './bridge/index.js';
+import { ConnectionConsentService, SqliteConnectionStore } from './connections/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
 import { createBrainHealthTool, createGatewayToolSet } from './gateway-tools/index.js';
 import { createEngramBrainHealthService } from './health/index.js';
@@ -83,8 +84,15 @@ async function main(): Promise<void> {
   } else if (brainGrants.length > 0) {
     logger.warn('BRAIN_GRANTS is ignored: authentication is off, so every caller may use every tool on every brain');
   }
+  // Connections (#27): a grant on the bare `/mcp` resource makes a connection
+  // with its own brains and roles, capped by the owner's grants.
+  const connections = new SqliteConnectionStore(db);
   const auth = authConfig.mode === 'oauth'
-    ? buildAuth(authConfig, { logger, db, policy: new GrantAccessPolicy(grants, authConfig.settings.resources) })
+    ? buildAuth(authConfig, {
+      logger, db,
+      policy: new GrantAccessPolicy(grants, authConfig.settings.resources),
+      connections: new ConnectionConsentService(grants, connections, authConfig.settings.resources[0]!, DEFAULT_BRAIN)
+    })
     : undefined;
   await auth?.warmUp();
 
@@ -92,7 +100,7 @@ async function main(): Promise<void> {
   // with the brain it was routed to; without auth the actor is `anonymous`.
   const auditLog = new SqliteAuditLog(db);
   const pipeline = createToolCallPipeline({
-    ...(auth ? { access: createToolAccess(grants) } : {}),
+    ...(auth ? { access: createToolAccess(grants, connections) } : {}),
     // Attribution (#21): who wrote each observation, in the gateway database;
     // shown next to mem_search / mem_get_observation results. Needs a signed-in caller.
     attribute: createAttributionStage({

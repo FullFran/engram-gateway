@@ -16,7 +16,8 @@ type Row = Record<string, SQLOutputValue>;
 function tokenRecord(row: Row): TokenRecord {
   return {
     clientId: String(row.client_id), login: String(row.login), scope: String(row.scope), resource: String(row.resource),
-    expiresAt: Number(row.expires_at), familyId: String(row.family_id)
+    expiresAt: Number(row.expires_at), familyId: String(row.family_id),
+    ...(row.connection_id !== null && row.connection_id !== undefined ? { connectionId: Number(row.connection_id) } : {})
   };
 }
 
@@ -31,6 +32,7 @@ function codeRecord(row: Row): CodeRecord {
     used: Number(row.used) === 1
   };
   if (row.family_id !== null) record.familyId = String(row.family_id);
+  if (row.connection_id !== null && row.connection_id !== undefined) record.connectionId = Number(row.connection_id);
   return record;
 }
 
@@ -129,13 +131,13 @@ export class SqliteTokenStore implements TokenStore {
     this.transact(() => {
       const a = access.record;
       this.run(
-        'INSERT OR REPLACE INTO access_tokens (hash, client_id, login, scope, resource, expires_at, family_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        access.hash, a.clientId, a.login, a.scope, a.resource, a.expiresAt, a.familyId
+        'INSERT OR REPLACE INTO access_tokens (hash, client_id, login, scope, resource, expires_at, family_id, connection_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        access.hash, a.clientId, a.login, a.scope, a.resource, a.expiresAt, a.familyId, a.connectionId ?? null
       );
       const r = refresh.record;
       this.run(
-        'INSERT OR REPLACE INTO refresh_tokens (hash, client_id, login, scope, resource, expires_at, family_id, used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        refresh.hash, r.clientId, r.login, r.scope, r.resource, r.expiresAt, r.familyId, r.usedAt ?? null
+        'INSERT OR REPLACE INTO refresh_tokens (hash, client_id, login, scope, resource, expires_at, family_id, used_at, connection_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        refresh.hash, r.clientId, r.login, r.scope, r.resource, r.expiresAt, r.familyId, r.usedAt ?? null, r.connectionId ?? null
       );
     });
   }
@@ -158,10 +160,10 @@ export class SqliteTokenStore implements TokenStore {
 
   putCode(hash: string, record: CodeRecord): void {
     this.transact(() => this.run(
-      `INSERT OR REPLACE INTO auth_codes (hash, client_id, redirect_uri, code_challenge, scope, resource, login, expires_at, used, family_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO auth_codes (hash, client_id, redirect_uri, code_challenge, scope, resource, login, expires_at, used, family_id, connection_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       hash, record.clientId, record.redirectUri, record.codeChallenge, record.scope, record.resource, record.login,
-      record.expiresAt, record.used ? 1 : 0, record.familyId ?? null
+      record.expiresAt, record.used ? 1 : 0, record.familyId ?? null, record.connectionId ?? null
     ));
   }
 
