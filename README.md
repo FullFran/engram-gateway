@@ -229,16 +229,18 @@ Engram release cannot add an unreviewed tool.
 - **Instance admins** are a flag on the user (`users.is_admin`), not a brain
   role. Every login in `ALLOWED_GITHUB_LOGINS` is an admin and `owner` of
   every brain.
-- **Where grants come from.** Until the grant management API (#10), the
-  configuration is the only source: on every start the gateway makes the
-  `grants` table and the admin flag match `ALLOWED_GITHUB_LOGINS` and
-  `BRAIN_GRANTS` exactly. A login removed from either loses that access on
-  the next start; `users` rows are kept (the audit log points at them).
-  `BRAIN_GRANTS` naming an unknown brain, a role other than `reader`,
-  `writer` or `owner`, or an admin fails startup.
-- **Revoking without a restart.** Delete the row from `grants` in
-  `gateway.db` (it applies to the next request), then remove the entry from
-  `BRAIN_GRANTS` as well, or the next start grants it again.
+- **Where grants come from.** Each grant has a source. `config` grants
+  follow `ALLOWED_GITHUB_LOGINS` (owner of every brain) and `BRAIN_GRANTS`:
+  on every start the gateway makes them and the admin flag match the
+  configuration exactly, so a login removed from either loses that access on
+  the next start. `api` grants are created with the [admin API or
+  CLI](#admin-api-and-cli) and survive restarts. A `BRAIN_GRANTS` entry for
+  the same login and brain as an `api` grant takes that row over
+  (configuration wins). `users` rows are never deleted (the audit log points
+  at them). `BRAIN_GRANTS` naming an unknown brain, a role other than
+  `reader`, `writer` or `owner`, or an admin fails startup.
+- **Revoking without a restart.** Use `admin grants revoke` (API grants) or,
+  for a configuration grant, remove it from `BRAIN_GRANTS` and restart.
 - **Auth off.** On a loopback bind without authentication there is no
   caller, so roles do not apply: every tool is allowed (and `BRAIN_GRANTS`
   is ignored with a warning).
@@ -324,8 +326,101 @@ id, a fixed `errorKind` such as `forward_failed`, and for a `denied` call its
 - **CSV export.** `auditCsvLines(log.read({ brain, fromMs, toMs }))` streams
   the log oldest first (read in pages, never all at once) as RFC 4180 CSV.
   Cells that start with `=`, `+`, `-`, `@`, tab or CR get a `'` prefix so a
-  spreadsheet does not run them as formulas. The admin-only HTTP endpoint
-  comes with the admin API.
+  spreadsheet does not run them as formulas. Download it from
+  `GET /admin/api/audit.csv` or `admin audit export` (see below); each
+  export is itself audited.
+- **Admin actions.** Every admin operation writes one row: `brain.create`,
+  `brain.archive`, `user.invite`, `user.disable`, `user.enable`, `grant.set`
+  (meta `role`, `previousRole`), `grant.revoke` (meta `role`) and
+  `audit.export`, with outcome `ok`, `error` (meta `errorKind`: `invalid`,
+  `not_found`, `conflict`) or `denied` (not an instance admin). The actor is
+  the admin's login, or the system actor `cli`.
+
+### Admin API and CLI
+
+Instance admins (`ALLOWED_GITHUB_LOGINS`) manage brains, users and grants
+(`src/admin/`). The HTTP API and the CLI call the same use cases; every
+operation is audited in the same transaction as its change.
+
+**CLI**, inside the container (it reads the gateway's own environment:
+`GATEWAY_DATA_DIR` or `GATEWAY_DB_PATH`, and `BRAINS_ROOT`):
+
+```sh
+docker exec <container> node dist/cli.js admin brains list
+docker exec <container> node dist/cli.js admin brains create <slug>
+docker exec <container> node dist/cli.js admin brains archive <slug>
+docker exec <container> node dist/cli.js admin users list
+docker exec <container> node dist/cli.js admin users invite <github-login>
+docker exec <container> node dist/cli.js admin users disable <github-login>
+docker exec <container> node dist/cli.js admin users enable <github-login>
+docker exec <container> node dist/cli.js admin grants list [--brain <slug>] [--login <github-login>]
+docker exec <container> node dist/cli.js admin grants set <github-login> <brain> <reader|writer|owner>
+docker exec <container> node dist/cli.js admin grants revoke <github-login> <brain>
+docker exec <container> node dist/cli.js admin audit export [--brain <slug>] [--from <date>] [--to <date>] [--out <file>]
+```
+
+Exit codes: `0` done, `1` refused (the reason on stderr), `2` usage. Dates
+are ISO 8601 or epoch milliseconds; `--out` never overwrites a file (mode
+`0600`), without it the CSV goes to stdout. The CLI writes the gateway
+database directly (WAL, shared safely with the running gateway) and is
+audited as the system actor `cli`.
+
+**HTTP API**, under `/admin/api`, only with authentication on (with auth off
+it does not exist; use the CLI). It accepts the signed-in browser session
+of an instance admin, the cookie set by the GitHub sign-in at
+`/oauth/login`; bearer tokens are never accepted (they are issued for the
+MCP endpoints). Anyone else gets `401` (no session) or `403` (not an admin,
+audited as `denied`). Requests that change something must send
+`Content-Type: application/json` (`415` otherwise) and are refused (`403`)
+when the browser marks them `Sec-Fetch-Site: cross-site`.
+
+| Method and path | Body | Does |
+| --- | --- | --- |
+| `GET /admin/api/brains` | | Brains with `status` (`active`, `archived`) and, for active ones, `live`/`idle` of their child |
+| `POST /admin/api/brains` | `{"slug"}` | Create a brain (`201`) |
+| `POST /admin/api/brains/<slug>/archive` | `{}` | Archive a brain |
+| `GET /admin/api/users` | | Users with `status` (`invited`, `active`, `disabled`) and `isAdmin` |
+| `POST /admin/api/users` | `{"login"}` | Invite a GitHub login (`201`) |
+| `POST /admin/api/users/<login>/disable` | `{}` | Disable a user |
+| `POST /admin/api/users/<login>/enable` | `{}` | Enable a disabled user |
+| `GET /admin/api/grants?brain=&login=` | | Grants with their `source` (`config`, `api`) |
+| `PUT /admin/api/brains/<slug>/grants/<login>` | `{"role"}` | Grant or change a role |
+| `DELETE /admin/api/brains/<slug>/grants/<login>` | | Revoke a grant (`204`) |
+| `GET /admin/api/audit.csv?brain=&from=&to=` | | Download the audit log as CSV |
+
+Errors answer `{"error": "invalid" | "not_found" | "conflict" | "forbidden", "message"}`
+with `400`, `404`, `409` or `403`.
+
+What each operation does:
+
+- **Create a brain.** Needs `BRAINS_ROOT`; creates `<BRAINS_ROOT>/<slug>`
+  (mode `0700`, refused if it exists and is not empty) and the brain row;
+  instance admins own it. The running gateway serves `/mcp/<slug>` on the
+  next request (the brain registry reads the `brains` table on every
+  request). With OAuth on, **restart the gateway before clients connect to
+  it**: each brain's OAuth protected resource (token audience and its
+  `/.well-known/oauth-protected-resource/mcp/<slug>` document) is registered
+  at startup, so no token can be issued for a new brain until then.
+  Backups and the brain's lock also cover it from the next restart. The
+  cloud-sync flag still comes from `ENGRAM_CLOUD_BRAINS` only.
+- **Archive a brain.** The brain is no longer served: `/mcp/<slug>` answers
+  404, its grants give no access, no token is issued for it, and its running
+  child is stopped through the registry (from the CLI, which cannot reach
+  the running gateway, the child stops when idle; new requests are refused
+  at once). Its row, grants and data directory stay on disk; nothing is
+  deleted (backups keep covering it), and `BRAINS` naming it does not bring
+  it back. The `default`
+  brain cannot be archived. There is no delete command.
+- **Invite a user.** Creates the user with status `invited`. The first
+  successful GitHub sign-in activates it, provided the user holds a grant
+  (an invite alone gives no access). Logins compare case-insensitively.
+- **Disable / enable a user.** A disabled user cannot sign in, has no role,
+  and their sessions and tokens stop working on the next request. Instance
+  admins are managed in `ALLOWED_GITHUB_LOGINS`, not here.
+- **Grant, change, revoke.** The user must exist (invite first) and the
+  brain must be active. Only `api` grants are managed here: a `config`
+  grant (from `BRAIN_GRANTS`, or an admin's ownership) is refused with
+  `409`; change it in the configuration. Changes apply to the next request.
 
 ### Backups
 

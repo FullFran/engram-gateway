@@ -11,6 +11,7 @@
 //   - the socket deleted under a live gateway: restore refuses (with or
 //     without --offline: the gateway holds the brain's lock)
 //   - with the gateway stopped the CLI runs offline (list, restore --offline, decrypt)
+//   - an archived brain (#10) is still backed up and restored by the running gateway
 //   - the key never appears in any output
 // Scratch state lives outside the repository and is removed on success.
 
@@ -106,7 +107,22 @@ try {
   assert((await search()).includes(`Remember ${marker}`), 'the live brain was not touched');
   ok('socket removed under a live gateway: restore refuses, --offline refuses too (brain lock)');
 
+  // ---- an archived brain (#10) is still backed up by the running gateway ----
   await gateway.stop();
+  const restarted = await startGateway(scratch, env);
+  outputs.push(restarted.output);
+  const archived = await cli('admin', 'brains', 'archive', 'alpha');
+  assertEqual(archived.code, 0, `admin brains archive: ${archived.stderr}`);
+  const afterArchive = await cli('backup', 'now');
+  assertEqual(afterArchive.code, 0, `backup now with an archived brain: ${afterArchive.stderr}`);
+  const archivedSnapshot = JSON.parse(afterArchive.stdout).taken.find(t => t.unit === 'brains/alpha')?.id;
+  assert(archivedSnapshot, 'the archived brain is backed up');
+  const archivedRestore = await cli('restore', 'alpha', archivedSnapshot);
+  assertEqual(archivedRestore.code, 0, `restore of an archived brain: ${archivedRestore.stderr}`);
+  assert(!archivedRestore.stderr.includes('offline'), 'the running gateway restored the archived brain');
+  ok('an archived brain is still backed up and restored through the running gateway');
+
+  await restarted.stop();
 
   // ---- offline CLI ----
   const offlineList = await cli('backup', 'list');

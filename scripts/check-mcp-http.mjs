@@ -16,16 +16,19 @@
 //   - roles (#6): a reader's tools/list holds reader tools only, its mem_save
 //     is an MCP error that writes nothing (audited as denied), no token for a
 //     brain without a grant, and a revoked grant answers 403 on the next request
+//   - admin API (#10): admin browser session only, an invited user activated by
+//     signing in, a brain created at runtime, an API grant surviving a restart,
+//     archiving refusing new sessions while the data stays, the audit CSV
 // Scratch state lives outside the repository and is removed on success.
 
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { GATEWAY_TOOL_ROLES, TOOL_ROLES } from '../dist/authz/index.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  assert, assertEqual, freePort, sleep, waitFor, githubEnv, githubLogin, mcpCall, mcpToolsList, obtainToken, request, startFakeGitHub, startGateway
+  assert, assertEqual, cookieHeader, freePort, sleep, waitFor, githubEnv, githubLogin, mcpCall, mcpToolsList, obtainToken, request, startFakeGitHub, startGateway
 } from './lib/harness.mjs';
 
 const LEGACY_VERSION = '2025-11-25';
@@ -347,6 +350,73 @@ async function checkRoles(github) {
   }
 }
 
+async function checkAdmin(github) {
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const dataDir = join(scratch, `data-${port}`);
+  const brainsRoot = join(scratch, `brains-${port}`);
+  const env = { PORT: String(port), BRAINS_ROOT: brainsRoot, BRAINS: 'alpha', ...githubEnv(port, github.url, dataDir) };
+  const bearer = token => ({ authorization: `Bearer ${token}` });
+  let gateway = await startGateway(scratch, env);
+  try {
+    const admin = await githubLogin(base, github, 'FullFran');
+    const session = { cookie: cookieHeader(admin.jar) };
+    const api = (method, path, json) => request(base, { method, path: `/admin/api${path}`, headers: session, ...(json !== undefined ? { json } : {}) });
+
+    // --- who may call: the admin's browser session, never a bearer token ---
+    assertEqual((await request(base, { path: '/admin/api/brains' })).status, 401, 'no session: 401');
+    const adminAlpha = await obtainToken(base, admin.jar, `${base}/mcp/alpha`);
+    assertEqual((await request(base, { path: '/admin/api/brains', headers: bearer(adminAlpha.accessToken) })).status, 401, 'an MCP access token is not an admin credential');
+    const listed = await api('GET', '/brains');
+    assertEqual(listed.status, 200, `admin lists brains (${listed.text.slice(0, 200)})`);
+    assertEqual(JSON.stringify(listed.body.brains.map(brain => brain.slug)), '["alpha","default"]', 'brains listed');
+    ok('the admin API answers the admin session only');
+
+    // --- invite + grant: the invited user signs in and gets the role ---
+    assertEqual((await api('POST', '/users', { login: 'invitee-i' })).status, 201, 'invite');
+    assertEqual((await githubLogin(base, github, 'invitee-i')).jar, null, 'an invite without a grant does not sign in');
+    assertEqual((await api('PUT', '/brains/alpha/grants/invitee-i', { role: 'writer' })).status, 200, 'grant writer');
+    const invitee = await githubLogin(base, github, 'invitee-i');
+    assert(invitee.jar, `the invited user signs in: ${invitee.poll.text.slice(0, 200)}`);
+    const inviteeAlpha = await obtainToken(base, invitee.jar, `${base}/mcp/alpha`);
+    assertEqual((await mcpToolsList(base, '/mcp/alpha', bearer(inviteeAlpha.accessToken))).status, 200, 'the invited writer uses alpha');
+    assertEqual((await api('GET', '/users')).body.users.find(user => user.login === 'invitee-i').status, 'active', 'the sign-in activated the invite');
+    ok('an invited user with a grant signs in, which activates the invite');
+
+    // --- a brain created at runtime is served at once ---
+    assertEqual((await request(base, { method: 'POST', path: '/mcp/gamma', json: {} })).status, 404, 'gamma does not exist yet');
+    const created = await api('POST', '/brains', { slug: 'gamma' });
+    assertEqual(created.status, 201, `create gamma (${created.text.slice(0, 200)})`);
+    assertEqual((await request(base, { method: 'POST', path: '/mcp/gamma', json: {} })).status, 401, 'gamma is served (auth required) without a restart');
+    ok('a brain created through the API is served without a restart');
+
+    // --- restart: the API grant survives; gamma gets its OAuth resource ---
+    await gateway.stop();
+    gateway = await startGateway(scratch, env);
+    assertEqual((await mcpToolsList(base, '/mcp/alpha', bearer(inviteeAlpha.accessToken))).status, 200, 'the API grant survived the restart');
+    const adminGamma = await obtainToken(base, admin.jar, `${base}/mcp/gamma`);
+    assertEqual((await mcpToolsList(base, '/mcp/gamma', bearer(adminGamma.accessToken))).status, 200, 'after the restart gamma has its OAuth resource');
+    ok('after a restart the API grant still works and the new brain issues tokens');
+
+    // --- archive: no new session, data stays on disk ---
+    assertEqual((await api('POST', '/brains/gamma/archive', {})).status, 200, 'archive gamma');
+    assertEqual((await mcpToolsList(base, '/mcp/gamma', bearer(adminGamma.accessToken))).status, 404, 'an archived brain is not served');
+    assert(existsSync(join(brainsRoot, 'gamma')), 'the archived brain keeps its data directory');
+    ok('archiving a brain refuses new sessions and keeps its data');
+
+    // --- audit CSV ---
+    const csv = await api('GET', '/audit.csv');
+    assertEqual(csv.status, 200, 'CSV export');
+    assert(/^text\/csv/.test(csv.headers['content-type']), 'CSV content type');
+    for (const action of ['user.invite', 'grant.set', 'brain.create', 'brain.archive', 'audit.export']) {
+      assert(csv.text.includes(`,FullFran,`) && csv.text.includes(`,${action},`), `the CSV holds ${action}`);
+    }
+    ok('every admin operation is in the audit CSV');
+  } finally {
+    await gateway.stop();
+  }
+}
+
 const github = await startFakeGitHub();
 try {
   console.log(`MCP HTTP checks (scratch: ${scratch})`);
@@ -356,6 +426,7 @@ try {
   await checkInvalidBrainConfig();
   await checkBrainAudiences(github);
   await checkRoles(github);
+  await checkAdmin(github);
   console.log(`MCP HTTP check passed: ${passed} groups.`);
 } catch (error) {
   console.error(`MCP HTTP check failed after ${passed} passing groups: ${error.stack || error.message}`);
