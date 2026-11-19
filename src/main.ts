@@ -30,7 +30,7 @@ import {
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createConnectionServer, createEngramBridge } from './bridge/index.js';
 import {
-  ConnectionAdmin, ConnectionConsentService, PersonalAccessTokens, SqliteConnectionStore, SqlitePatStore, createAccountRouter, nodePatSecrets, patIdentityProvider
+  ConnectionAdmin, ConnectionConsentService, PersonalAccessTokens, adminPatPort, SqliteConnectionStore, SqlitePatStore, createAccountRouter, nodePatSecrets, patIdentityProvider
 } from './connections/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
 import { BRAIN_RESOLVE_TOOL, createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet } from './gateway-tools/index.js';
@@ -241,7 +241,8 @@ async function main(): Promise<void> {
         store: new SqliteAdminStore(db),
         dirs: fsBrainDirectories(brainsConfig.brainsRoot),
         clock: { nowMs: () => Date.now() },
-        runtime: registry
+        runtime: registry,
+        tokens: adminPatPort(pats, { nowMs: () => Date.now() })
       }),
       identify,
       logger

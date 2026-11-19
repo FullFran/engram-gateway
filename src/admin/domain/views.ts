@@ -12,10 +12,21 @@ export interface BrainView {
   status: BrainStatus;
 }
 
+/** `service` (#7): a non-human principal owned by an admin; it never signs in. */
+export type UserKind = 'human' | 'service';
+
 export interface UserView {
   login: string;
   status: UserStatus;
   isAdmin: boolean;
+  kind: UserKind;
+}
+
+export interface ServiceAccountView {
+  login: string;
+  status: UserStatus;
+  /** The instance admin who created it (null if that user row is gone). */
+  owner: string | null;
 }
 
 export interface GrantView {

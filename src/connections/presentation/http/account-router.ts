@@ -1,6 +1,6 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
-import type { PersonalAccessTokens } from '../../application/personal-access-tokens.js';
+import type { CreatePatRequest, PatActor, PersonalAccessTokens } from '../../application/personal-access-tokens.js';
 import { PatError } from '../../application/personal-access-tokens.js';
 import { patStatus } from '../../domain/personal-access-token.js';
 import type { PatView } from '../../domain/personal-access-token.js';
@@ -24,6 +24,23 @@ export function patJson(pat: PatView, nowS: number) {
   return {
     id: pat.id, name: pat.name, brains: pat.brains, scope: pat.scope, status: patStatus(pat, nowS),
     createdAt: iso(pat.createdAt), expiresAt: iso(pat.expiresAt), lastUsedAt: iso(pat.lastUsedAt), revokedAt: iso(pat.revokedAt)
+  };
+}
+
+/**
+ * The admin use cases' port to personal access tokens (`AdminTokens` in
+ * src/admin), for service accounts: JSON views, never a secret except the
+ * one of a creation. `PatError` carries the `code` the admin layer maps.
+ */
+export function adminPatPort(tokens: PersonalAccessTokens, clock: { nowMs(): number }) {
+  const nowS = () => Math.floor(clock.nowMs() / 1000);
+  return {
+    list: (owner: string) => tokens.list(owner).map(pat => patJson(pat, nowS())),
+    create: (actor: PatActor, owner: string, request: CreatePatRequest) => {
+      const created = tokens.create(actor, owner, request);
+      return { token: created.token, ...patJson(created.pat, nowS()) };
+    },
+    revoke: (actor: PatActor, owner: string, id: number) => patJson(tokens.revoke(actor, owner, id), nowS())
   };
 }
 
