@@ -788,7 +788,9 @@ own tools.
 
 Per brain, a human-approved wiki next to the journal (#16): agents read a
 bounded pack of the journal (`brain_compile_pack`) and propose typed pages
-and links citing observation `sync_id`s (`brain_propose`, writers). Stored
+and links citing observation `sync_id`s (`brain_propose`, writers); owners approve all
+or part of a proposal, bound to a review fingerprint (`brain_review`,
+`brain_decide`). Stored
 in the brain's own `wiki.db`, never in `engram.db`; included in backups.
 See [docs/wiki.md](docs/wiki.md).
 

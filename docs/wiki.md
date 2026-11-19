@@ -52,6 +52,39 @@ with "being restored; retry shortly", so a decision never races the file swap.
      never reused, and the revision grows.
 
    Nothing changes the wiki until an owner approves.
+3. **`brain_proposals`** (writer): proposals newest first, with status
+   (`open`, `returned`, `rejected`, `closed`) and pending item count;
+   `status` filter, `limit` (default 20, at most 100).
+4. **`brain_review`** (writer): one proposal's pending items, the current
+   revision of every page they touch, warnings, past decisions, and the
+   **fingerprint** of a selection (`itemIds`, default every pending item).
+5. **`brain_decide`** (owner): `approve` (with `fingerprint`, optional
+   `itemIds`), `return` (back to the proposer, with a `comment`) or `reject`
+   (closes the proposal and rejects its pending items).
+
+## Review rules
+
+- **Fingerprint.** SHA-256 of the proposal id and revision, the selected
+  item ids, the current revision of every page the selection touches, and
+  whether each link it adds or removes exists. Approving recomputes it in
+  the same transaction that applies the items: if the proposal was revised,
+  or another decision changed one of its pages or links, the approval is
+  refused (`stale`) and nothing is written. Review again and decide on what
+  you read.
+- **Partial approval.** Only the selected items are applied, in proposal
+  order, all or none: if one cannot be applied (a link whose page is neither
+  in the wiki nor in the selection, a link that already exists, an unlink of
+  a missing link) the whole decision rolls back. Unselected items stay
+  pending; the proposal closes when none is left.
+- **Return and revise.** A returned proposal cannot be approved until its
+  proposer (or an owner) revises it with `brain_propose` and `proposalId`;
+  that bumps the revision, so earlier fingerprints no longer fit. An owner
+  correcting a proposal does the same, then approves it.
+- **Who decides.** Brain owners only (instance admins own every brain). There
+  is no separate curator role.
+- **History.** Every decision is a row in `decisions` (action, items,
+  fingerprint, who, comment, when). Approved pages get a new revision;
+  earlier revisions stay.
 
 ## Warnings
 

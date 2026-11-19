@@ -1,5 +1,5 @@
 import { isRole } from '../../authz/domain/role.js';
-import { LINK_TYPES, PACK_LIMITS, PAGE_KINDS, WIKI_LIMITS, WIKI_TOOLS, WikiError, type WikiActor, type WikiService } from '../../wiki/index.js';
+import { DECISION_ACTIONS, LINK_TYPES, PACK_LIMITS, PAGE_KINDS, PROPOSALS_LIMITS, WIKI_LIMITS, WIKI_TOOLS, WikiError, type WikiActor, type WikiService } from '../../wiki/index.js';
 import { toolError, type GatewayTool, type GatewayToolContext, type GatewayToolResult } from '../domain/gateway-tool.js';
 
 /**
@@ -71,6 +71,63 @@ export function createWikiTools(wiki: WikiService): GatewayTool[] {
         annotations: { title: 'Wiki: propose', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
       },
       call: async (args, ctx) => run(ctx, (actor, brain) => wiki.propose(actor, brain, args))
+    },
+    {
+      definition: {
+        name: WIKI_TOOLS.proposals,
+        description: 'Wiki proposals of this brain, newest first, with their status (open, returned, rejected, closed) and number of pending items.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['open', 'returned', 'rejected', 'closed'] },
+            limit: { type: 'integer', minimum: 1, description: `Proposals returned (default ${PROPOSALS_LIMITS.defaultLimit}, at most ${PROPOSALS_LIMITS.maxLimit}).` }
+          },
+          additionalProperties: false
+        },
+        annotations: { title: 'Wiki: proposals', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+      },
+      call: async (args, ctx) => run(ctx, (actor, brain) => wiki.proposals(actor, brain, args))
+    },
+    {
+      definition: {
+        name: WIKI_TOOLS.review,
+        description:
+          'Read one proposal for review: its pending items, the current revision of every page they touch, warnings, past decisions, and a fingerprint of the selection ' +
+          `(itemIds, default every pending item). ${WIKI_TOOLS.decide} approves only with that fingerprint, so a proposal or page that changed since is never approved unread.`,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            proposalId: { type: 'integer', minimum: 1 },
+            itemIds: { type: 'array', items: { type: 'integer', minimum: 1 }, minItems: 1, description: 'The items you intend to approve (default: every pending item).' }
+          },
+          required: ['proposalId'],
+          additionalProperties: false
+        },
+        annotations: { title: 'Wiki: review a proposal', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+      },
+      call: async (args, ctx) => run(ctx, (actor, brain) => wiki.review(actor, brain, args))
+    },
+    {
+      definition: {
+        name: WIKI_TOOLS.decide,
+        description:
+          `Decide on a proposal (brain owners). approve: apply the selected items (itemIds, default every pending item) with the fingerprint ${WIKI_TOOLS.review} returned for that selection; ` +
+          'all of them or none, and the rest stay pending. return: send it back to its proposer with a comment. reject: close it.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            proposalId: { type: 'integer', minimum: 1 },
+            action: { type: 'string', enum: [...DECISION_ACTIONS] },
+            itemIds: { type: 'array', items: { type: 'integer', minimum: 1 }, minItems: 1, description: 'approve only: the items to apply.' },
+            fingerprint: { type: 'string', description: `approve: the fingerprint ${WIKI_TOOLS.review} returned for this selection.` },
+            comment: { type: 'string', maxLength: WIKI_LIMITS.maxCommentChars }
+          },
+          required: ['proposalId', 'action'],
+          additionalProperties: false
+        },
+        annotations: { title: 'Wiki: decide', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+      },
+      call: async (args, ctx) => run(ctx, (actor, brain) => wiki.decide(actor, brain, args))
     }
   ];
 }

@@ -1,4 +1,4 @@
-import type { ItemState, PageKind, ProposalItem, ProposalStatus } from '../domain/wiki.js';
+import type { ItemState, LinkItem, PageKind, ProposalItem, ProposalStatus, UpsertPageItem } from '../domain/wiki.js';
 
 export interface StoredItem {
   id: number;
@@ -16,6 +16,28 @@ export interface StoredProposal {
   updatedAtMs: number;
   /** In proposal order. */
   items: StoredItem[];
+}
+
+export interface ProposalListing {
+  id: number;
+  revision: number;
+  status: ProposalStatus;
+  proposer: string | null;
+  summary: string;
+  pendingItems: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface DecisionRecord {
+  id: number;
+  action: 'approve' | 'return' | 'reject' | 'undo';
+  proposalRevision: number;
+  itemIds: number[];
+  decidedBy: string | null;
+  comment: string | null;
+  decidedAtMs: number;
+  undoneBy: number | null;
 }
 
 export interface PageSummary {
@@ -45,6 +67,20 @@ export interface WikiStore {
   hasLiveLink(from: string, to: string, type: string): boolean;
   /** Ids of other open or returned proposals with a pending item touching `slug`. */
   otherProposalsTouching(slug: string, proposalId: number): number[];
+  /** Newest first, at most `limit`. */
+  proposals(filter: { status?: ProposalStatus }, limit: number): ProposalListing[];
+  /** The decisions on a proposal, oldest first. */
+  decisions(proposalId: number): DecisionRecord[];
+  insertDecision(decision: { proposalId: number; proposalRevision: number; action: DecisionRecord['action']; itemIds: readonly number[]; fingerprint: string | null; decidedBy: string | null; comment: string | null; atMs: number }): number;
+  /** Appends a revision to the page (created when missing) and makes it current; returns its revision number. */
+  appendRevision(item: UpsertPageItem, by: { decisionId: number; createdBy: string | null; atMs: number }): number;
+  /** The id of a page with a current revision. */
+  livePageId(slug: string): number | undefined;
+  liveLinkId(item: LinkItem): number | undefined;
+  insertLink(item: LinkItem, fromId: number, toId: number, decisionId: number): void;
+  removeLink(linkId: number, decisionId: number): void;
+  setItemsState(itemIds: readonly number[], state: ItemState, decisionId: number): void;
+  setProposalStatus(id: number, status: ProposalStatus, atMs: number): void;
   /** Live pages by slug, at most `limit`, and how many there are. */
   pages(limit: number): { pages: PageSummary[]; total: number };
   close(): void;
