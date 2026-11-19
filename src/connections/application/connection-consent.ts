@@ -17,8 +17,9 @@ export const NO_ROLE = 'none';
  *
  * Offer: every brain the person holds a grant on, with the roles up to
  * theirs. Preselected: the existing connection of this client when there is
- * one, else `preferredBrain` (or the first granted brain) at the person's role,
- * which is exactly what a token for the bare endpoint opened before #27.
+ * one, else `preferredBrain` (or the first granted brain) as reader: least
+ * privilege by default, since an owner connection can attach more brains by
+ * itself (connection_attach). The person raises the role on the form.
  */
 export class ConnectionConsentService implements ConnectionConsent {
   constructor(
@@ -35,7 +36,7 @@ export class ConnectionConsentService implements ConnectionConsent {
     const fallback = owned.find(grant => grant.brain === this.preferredBrain) ?? owned[0];
     const selected = existing
       ? new Map(existing.brains.map(({ brain, role }) => [brain, role]))
-      : new Map(fallback ? [[fallback.brain, fallback.role]] : []);
+      : new Map<string, Role>(fallback ? [[fallback.brain, 'reader']] : []);
     const defaultBrain = existing ? existing.defaultBrain : fallback?.brain;
     return {
       name: existing?.name ?? defaultName(client, login),

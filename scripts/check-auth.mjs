@@ -762,7 +762,8 @@ async function checkRealServerFlow(github) {
     const sessionOnly = await request(base, { method: 'POST', path: '/mcp', headers: { ...cookie, accept: 'application/json, text/event-stream' }, json: {} });
     assertEqual(sessionOnly.status, 401, '/mcp does not accept the session cookie');
     const bridged = jsonRpcResult(await mcpToolsList(base, apiTokens.access_token), 1).tools.map(tool => tool.name);
-    assert(bridged.includes('mem_save') && bridged.includes('mem_search'), `engram tools reach the client: ${bridged.join(',')}`);
+    // The consent page preselects reader for a new connection (least privilege): read tools reach the client, write tools do not.
+    assert(bridged.includes('mem_search') && !bridged.includes('mem_save'), `a default consent gives a reader connection: ${bridged.join(',')}`);
     ok('/mcp needs a bearer (no cookie, no bad token) and serves the engram tools');
 
     // --- store holds hashes only ---

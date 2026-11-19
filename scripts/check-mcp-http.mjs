@@ -78,7 +78,8 @@ async function checkGuardedEndpoint(github) {
     // --- an authorized call ---
     const github1 = await githubLogin(base, github, 'FullFran');
     assert(github1.jar, `GitHub login completes (${github1.poll.text})`);
-    const { accessToken } = await obtainToken(base, github1.jar);
+    // The consent page preselects reader (least privilege); a round trip needs writing, so pick owner, as a person would.
+    const { accessToken } = await obtainToken(base, github1.jar, undefined, { 'role:default': 'owner' });
     assert(accessToken, 'an access token is issued');
     const auth = { authorization: `Bearer ${accessToken}` };
     const list = await mcpToolsList(base, '/mcp', auth);
@@ -463,15 +464,18 @@ async function checkConnections(github) {
     assertEqual(JSON.stringify(audited.map(row => [row.outcome, JSON.parse(row.meta_json).connectionId])), JSON.stringify([['denied', Number(connection.id)]]), 'the audit row carries the connection id');
     ok('a reader connection of an owner cannot save: MCP error, engram unchanged, audit row with the connection id');
 
-    // --- the page's defaults (the owner's role on default) keep the old /mcp behaviour; /mcp/<slug> makes no connection ---
-    const owning = await obtainToken(base, owner.jar, undefined);
+    // --- the page's defaults give a reader connection (least privilege); raising the role on the page restores writing; /mcp/<slug> makes no connection ---
+    const defaulted = await obtainToken(base, owner.jar, undefined);
+    const refusedSave = await mcpCall(base, '/mcp', 'mem_save', { title: `${marker}-d`, content: `default consent ${marker}`, type: 'discovery' }, bearer(defaulted.accessToken));
+    assert(refusedSave.result?.error || refusedSave.result?.result?.isError, `the default connection is a reader and cannot save: ${refusedSave.text.slice(0, 200)}`);
+    const owning = await obtainToken(base, owner.jar, undefined, { 'role:default': 'owner', connection_name: `raised ${marker}` });
     const saved = await mcpCall(base, '/mcp', 'mem_save', { title: `${marker}-o`, content: `owner wrote ${marker}`, type: 'discovery' }, bearer(owning.accessToken));
-    assert(saved.result?.result && !saved.result.result.isError, `the default connection saves: ${saved.text.slice(0, 200)}`);
+    assert(saved.result?.result && !saved.result.result.isError, `a connection raised to owner saves: ${saved.text.slice(0, 200)}`);
     const before = readDb('SELECT count(*) AS n FROM connections')[0].n;
     const single = await obtainToken(base, owner.jar, `${base}/mcp/alpha`);
     assertEqual((await mcpToolsList(base, '/mcp/alpha', bearer(single.accessToken))).status, 200, 'a single-brain token still works');
     assertEqual(readDb('SELECT count(*) AS n FROM connections')[0].n, before, 'no connection for /mcp/<slug>');
-    ok('approving the page as shown keeps the owner\'s access on /mcp; /mcp/<slug> tokens stay single-brain');
+    ok('the page defaults to reader on /mcp, the person can raise it; /mcp/<slug> tokens stay single-brain');
   } finally {
     await gateway.stop();
   }

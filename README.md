@@ -280,8 +280,8 @@ applies to the next request.
   a role (or `none`) for each brain the user holds a grant on, offering only
   roles up to the user's own, and the default brain. The page preselects the
   client's existing connection, or else the `default` brain (or the first
-  granted brain) at the user's role, which is what a `/mcp` token opened
-  before connections. The choice is checked again against the user's grants
+  granted brain) as `reader`: least privilege by default; the user raises
+  the role on the page. The choice is checked again against the user's grants
   when the form is submitted; a brain without a grant or a role above the
   grant is refused and nothing is saved. Consenting again from the same
   client updates its one connection, so every token already issued to that
@@ -365,9 +365,9 @@ applies to the next request.
   (a memory, a web page, a file) can ask it to attach another brain. With
   `owner` on a brain the connection can attach any brain its owner holds, up
   to the owner's role, without asking the person. The consent page
-  preselects the person's own role, so an owner gets `owner` unless they
-  lower it: give a chat client `writer` or `reader` on every brain to keep
-  its brains fixed, and change them from the consent page (sign in again)
+  preselects `reader` for a new connection, so a connection gets `owner`
+  (and with it attach) only when the person picks it: give a chat client
+  `writer` or `reader` on every brain to keep its brains fixed, and change them from the consent page (sign in again)
   instead. Attach and detach are in the audit log.
 
 ### Personal access tokens
