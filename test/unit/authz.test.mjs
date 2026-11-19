@@ -1,0 +1,163 @@
+// Roles and grants per brain (#6): the tool-to-role table, the pure role
+// decision, the grants repository and its startup sync, and the access policy
+// the OAuth server asks before issuing or refreshing a token.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  TOOL_ROLES, GrantAccessPolicy, SqliteGrantRepository, bootstrapAccess, brainOfResource, createToolAccess, decideTool,
+  effectiveRole, parseBrainGrants, requiredRole
+} from '../../dist/authz/index.js';
+import { SqliteBrainRepository } from '../../dist/brains/index.js';
+import { openGatewayDatabase } from '../../dist/shared/gateway-database.js';
+import { ENGRAM_TOOLS } from '../fixtures/engram-tools.mjs';
+
+
+function scratchDb(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'engram-gateway-authz-'));
+  const db = openGatewayDatabase(join(dir, 'gateway.db'));
+  t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  return db;
+}
+
+function withBrains(db, slugs) {
+  const brains = new SqliteBrainRepository(db);
+  for (const slug of slugs) brains.ensure(slug, `/data/brains/${slug}`);
+  return slugs;
+}
+
+test('tool table: every engram tool has a role, and nothing else does', () => {
+  assert.deepEqual(Object.keys(TOOL_ROLES).sort(), [...ENGRAM_TOOLS].sort());
+  assert.equal(requiredRole('mem_search'), 'reader');
+  assert.equal(requiredRole('mem_save'), 'writer');
+  assert.equal(requiredRole('mem_session_end'), 'writer');
+  assert.equal(requiredRole('mem_delete'), 'owner');
+  assert.equal(requiredRole('mem_merge_projects'), 'owner');
+  for (const name of ['mem_brand_new', 'toString', '__proto__', 'constructor', '']) assert.equal(requiredRole(name), undefined, name);
+});
+
+test('decision: reader < writer < owner, unmapped tools and missing grants are denied', () => {
+  assert.deepEqual(decideTool({ user: 'reader' }, 'mem_search'), { allowed: true, role: 'reader' });
+  assert.deepEqual(decideTool({ user: 'reader' }, 'mem_save'), { allowed: false, reason: 'insufficient_role', role: 'reader', required: 'writer' });
+  assert.deepEqual(decideTool({ user: 'writer' }, 'mem_save'), { allowed: true, role: 'writer' });
+  assert.deepEqual(decideTool({ user: 'writer' }, 'mem_delete'), { allowed: false, reason: 'insufficient_role', role: 'writer', required: 'owner' });
+  assert.deepEqual(decideTool({ user: 'owner' }, 'mem_delete'), { allowed: true, role: 'owner' });
+  assert.deepEqual(decideTool({ user: 'owner' }, 'mem_brand_new'), { allowed: false, reason: 'unknown_tool', role: 'owner' });
+  assert.deepEqual(decideTool({}, 'mem_search'), { allowed: false, reason: 'no_grant' });
+});
+
+test('decision: the connection layer (#27) caps the user role; absent, it is the user role', () => {
+  assert.equal(effectiveRole({ user: 'owner' }), 'owner');
+  assert.equal(effectiveRole({ user: 'owner', connection: 'reader' }), 'reader');
+  assert.equal(effectiveRole({ user: 'reader', connection: 'owner' }), 'reader');
+  assert.equal(effectiveRole({ user: 'owner', connection: null }), undefined);
+  assert.equal(effectiveRole({ connection: 'owner' }), undefined);
+  assert.deepEqual(decideTool({ user: 'owner', connection: 'reader' }, 'mem_save'), { allowed: false, reason: 'insufficient_role', role: 'reader', required: 'writer' });
+});
+
+test('BRAIN_GRANTS parses login:brain:role entries and rejects malformed ones', () => {
+  assert.deepEqual(parseBrainGrants(undefined), []);
+  assert.deepEqual(parseBrainGrants(' alice:work:reader , Bob:default:writer,, '), [
+    { login: 'alice', brain: 'work', role: 'reader' },
+    { login: 'Bob', brain: 'default', role: 'writer' }
+  ]);
+  assert.throws(() => parseBrainGrants('alice:work'), /BRAIN_GRANTS: .*login:brain:role/);
+  assert.throws(() => parseBrainGrants('alice:work:admin'), /BRAIN_GRANTS: .*role/);
+  assert.throws(() => parseBrainGrants('bad login!:work:reader'), /BRAIN_GRANTS: .*GitHub login/);
+  assert.throws(() => parseBrainGrants('alice:Work:reader'), /BRAIN_GRANTS: .*brain slug/);
+  assert.throws(() => parseBrainGrants('alice:work:reader,ALICE:work:writer'), /BRAIN_GRANTS: .*twice/);
+});
+
+test('startup sync: admins own every brain, BRAIN_GRANTS rows exist, nothing else does', t => {
+  const db = scratchDb(t);
+  const brains = withBrains(db, ['default', 'work', 'team']);
+  const repo = new SqliteGrantRepository(db);
+  bootstrapAccess(repo, { admins: ['FullFran'], grants: [{ login: 'alice', brain: 'work', role: 'reader' }], brains });
+  assert.equal(repo.roleOf('fullfran', 'default'), 'owner', 'logins compare case-insensitively');
+  assert.equal(repo.roleOf('FullFran', 'team'), 'owner');
+  assert.equal(repo.roleOf('alice', 'work'), 'reader');
+  assert.equal(repo.roleOf('alice', 'team'), undefined);
+  assert.equal(repo.isAdmin('FullFran'), true);
+  assert.equal(repo.isAdmin('alice'), false);
+  assert.equal(repo.hasAccess('alice'), true);
+  assert.equal(repo.hasAccess('FullFran'), true);
+  assert.equal(repo.hasAccess('mallory'), false);
+  // The audit log (#8) adds a users row for every caller; a row alone grants nothing.
+  db.prepare("INSERT INTO users (github_login) VALUES ('dave')").run();
+  assert.equal(repo.hasAccess('dave'), false);
+
+  // Next start: alice left BRAIN_GRANTS and FullFran left ALLOWED_GITHUB_LOGINS.
+  bootstrapAccess(repo, { admins: ['carol'], grants: [{ login: 'bob', brain: 'team', role: 'writer' }], brains });
+  assert.equal(repo.roleOf('alice', 'work'), undefined, 'a grant removed from BRAIN_GRANTS is revoked');
+  assert.equal(repo.roleOf('FullFran', 'default'), undefined, 'a former admin loses the owner grants');
+  assert.equal(repo.isAdmin('FullFran'), false);
+  assert.equal(repo.roleOf('carol', 'work'), 'owner');
+  assert.equal(repo.roleOf('bob', 'team'), 'writer');
+  const users = db.prepare('SELECT github_login FROM users ORDER BY github_login').all().map(row => row.github_login);
+  assert.deepEqual(users, ['alice', 'bob', 'carol', 'dave', 'FullFran'], 'users rows are kept (history), only grants and the admin flag change');
+});
+
+test('startup sync fails loudly on an unknown brain or a grant for an admin, and changes nothing', t => {
+  const db = scratchDb(t);
+  const brains = withBrains(db, ['default']);
+  const repo = new SqliteGrantRepository(db);
+  bootstrapAccess(repo, { admins: ['FullFran'], grants: [], brains });
+  assert.throws(() => bootstrapAccess(repo, { admins: ['FullFran'], grants: [{ login: 'alice', brain: 'ghost', role: 'reader' }], brains }), /BRAIN_GRANTS names an unknown brain: "ghost"/);
+  assert.throws(() => bootstrapAccess(repo, { admins: ['FullFran'], grants: [{ login: 'fullfran', brain: 'default', role: 'reader' }], brains }), /fullfran.*admin/);
+  assert.equal(repo.roleOf('FullFran', 'default'), 'owner', 'the failed sync rolled back');
+});
+
+test('a suspended user has no role and may not sign in', t => {
+  const db = scratchDb(t);
+  const brains = withBrains(db, ['default']);
+  const repo = new SqliteGrantRepository(db);
+  bootstrapAccess(repo, { admins: [], grants: [{ login: 'alice', brain: 'default', role: 'writer' }], brains });
+  db.prepare("UPDATE users SET status = 'suspended' WHERE github_login = 'alice'").run();
+  assert.equal(repo.roleOf('alice', 'default'), undefined);
+  assert.equal(repo.hasAccess('alice'), false);
+});
+
+test('revocation takes effect on the next check: no cached authorization', t => {
+  const db = scratchDb(t);
+  const brains = withBrains(db, ['default']);
+  const repo = new SqliteGrantRepository(db);
+  bootstrapAccess(repo, { admins: [], grants: [{ login: 'alice', brain: 'default', role: 'writer' }], brains });
+  const access = createToolAccess(repo);
+  assert.equal(access.check({ login: 'alice' }, 'default', 'mem_save').allowed, true);
+  db.prepare('DELETE FROM grants').run();
+  assert.equal(access.check({ login: 'alice' }, 'default', 'mem_save').allowed, false);
+  assert.equal(access.check(undefined, 'default', 'mem_search').allowed, false, 'no caller, no access');
+  assert.equal(access.check({ login: 'alice' }, null, 'mem_search').allowed, false, 'no brain, no access');
+});
+
+const RESOURCE = 'https://memory.example.com/mcp';
+
+test('resources map to brains: /mcp is the default brain, /mcp/<slug> that brain', () => {
+  assert.equal(brainOfResource(RESOURCE, RESOURCE), 'default');
+  assert.equal(brainOfResource(`${RESOURCE}/default`, RESOURCE), 'default');
+  assert.equal(brainOfResource(`${RESOURCE}/work`, RESOURCE), 'work');
+  assert.equal(brainOfResource(`${RESOURCE}/work/x`, RESOURCE), undefined);
+  assert.equal(brainOfResource('https://other.example.com/mcp', RESOURCE), undefined);
+});
+
+test('access policy: sign-in needs an active user, a token needs a grant on its brain', t => {
+  const db = scratchDb(t);
+  const brains = withBrains(db, ['default', 'work']);
+  const repo = new SqliteGrantRepository(db);
+  bootstrapAccess(repo, { admins: ['FullFran'], grants: [{ login: 'alice', brain: 'work', role: 'reader' }], brains });
+  const resources = [RESOURCE, `${RESOURCE}/default`, `${RESOURCE}/work`];
+  const policy = new GrantAccessPolicy(repo, resources);
+  assert.equal(policy.maySignIn('FullFran'), true);
+  assert.equal(policy.maySignIn('alice'), true, 'a user with grants signs in without being an admin');
+  assert.equal(policy.maySignIn('mallory'), false);
+  db.prepare("INSERT INTO users (github_login) VALUES ('dave')").run();
+  assert.equal(policy.maySignIn('dave'), false, 'a users row without any grant does not sign in');
+  assert.equal(policy.mayUse('alice', `${RESOURCE}/work`), true);
+  assert.equal(policy.mayUse('alice', RESOURCE), false, 'no token for a brain without a grant');
+  assert.equal(policy.mayUse('FullFran', RESOURCE), true);
+  assert.equal(policy.mayUse('FullFran', 'https://memory.example.com/elsewhere'), false);
+  assert.deepEqual(policy.describeResource(`${RESOURCE}/work`), { name: 'Engram memory' });
+  assert.equal(policy.describeResource('https://memory.example.com/elsewhere'), undefined);
+});
