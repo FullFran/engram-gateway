@@ -23,6 +23,8 @@ import { AdminService, SqliteAdminStore, createAdminRouter, fsBrainDirectories }
 import { SqliteAuthorshipRepository, createAttributor } from './attribution/index.js';
 import { ANONYMOUS_ACTOR, SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
+import { createUiRouter } from './ui/index.js';
+import type { UiIdentify } from './ui/index.js';
 import { CONNECTION_TOOL_KINDS, GATEWAY_TOOL_ROLES, GrantAccessPolicy, SqliteGrantRepository, bootstrapAccess, createToolAccess, parseAdminLogins, parseBrainGrants, TOOL_ROLES } from './authz/index.js';
 import {
   BackupService, CONTROL_SOCKET_NAME, createBackupCipher, openBrainLock, resolveBackupConfig, serveBackupControl, sqliteSnapshotter, startBackupSchedule
@@ -271,6 +273,17 @@ async function main(): Promise<void> {
       logger
     }),
     accountApi: identify => createAccountRouter({ tokens: pats, identify, clock: { nowMs: () => Date.now() } }),
+    ...(auth ? {
+      ui: (identify: UiIdentify) => createUiRouter({
+        identify,
+        origin: new URL(auth.settings.issuer).origin,
+        isAdmin: login => grants.isAdmin(login),
+        tokens: pats,
+        brainsOf: login => grants.grantsOf(login),
+        clock: { nowMs: () => Date.now() },
+        logger
+      })
+    } : {}),
     logger
   });
   const server = createServer(app);

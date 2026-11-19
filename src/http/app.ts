@@ -3,10 +3,13 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { IncomingMessage } from 'node:http';
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
+import { parseCookies } from '../auth/index.js';
 import type { HttpRequestAuthenticator } from '../auth/index.js';
 import { ADMIN_API_PATH } from '../admin/index.js';
 import type { AdminIdentify } from '../admin/index.js';
 import { PAT_PROVIDER } from '../connections/index.js';
+import { UI_PATH } from '../ui/index.js';
+import type { UiIdentify } from '../ui/index.js';
 import { MCP_AUTH_INFO_LOCAL, MCP_BRAIN_LOCAL, MCP_CONNECTION_LOCAL, MCP_DEFAULT_BRAIN, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
 import type { McpBrains, McpServerFactory } from './mcp-route.js';
 
@@ -71,6 +74,11 @@ export interface GatewayAppOptions {
    * Mounted at `/account/api` when auth is on.
    */
   accountApi?: (identify: AdminIdentify) => express.Router;
+  /**
+   * Builds the web admin panel (#17) from the request's browser session.
+   * Mounted at `/ui` when auth is on.
+   */
+  ui?: (identify: UiIdentify) => express.Router;
   /** The brains served at `/mcp/<slug>` (`/mcp`: the default brain), with live/idle counts for `/health/brains`. */
   brains: McpBrains & { stats(): { live: number; idle: number } };
   /** `GET /admin/brains/<slug>/health`; absent: no admin endpoints. */
@@ -131,6 +139,18 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
   };
   if (auth && options.adminApi) app.use(ADMIN_API_PATH, options.adminApi(identify));
   if (auth && options.accountApi) app.use(ACCOUNT_API_PATH, options.accountApi(identify));
+  // The panel's CSRF tokens are bound to the session cookie itself (it holds
+  // a random session id), so they die with the session. A provider that
+  // names no session cookie binds them to the login.
+  const identifySession: UiIdentify = async req => {
+    const login = await identify(req);
+    if (!login) return undefined;
+    const cookies = parseCookies(single(req.headers.cookie));
+    const names = auth!.authenticator.sessionCookieNames(single(req.headers.cookie)).sort();
+    const binding = names.map(name => `${name}=${cookies.get(name) ?? ''}`).join(';');
+    return { login, binding: binding || `login:${login}` };
+  };
+  if (auth && options.ui) app.use(UI_PATH, options.ui(identifySession));
 
   /** Audiences a token may carry for this request's brain; the first is the canonical one. */
   const audiences = (base: string, slug: string, bare: boolean): string[] => {
