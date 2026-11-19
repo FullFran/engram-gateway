@@ -651,6 +651,8 @@ or a personal access token never opens it. With auth off there is no panel.
 
 | Page | Who | What |
 |------|-----|------|
+| `/ui/brains` | instance admins | Every brain with its status and what the running gateway does with it (stopped, live and serving, live and idle); create a brain, archive one (not the default). Audited as `brain.create` / `brain.archive` |
+| `/ui/brains/<slug>` | instance admins | The brain's health report (#18): observations, types, noise, duplicate titles, pending relations, past review dates. Audited as `admin.brain_health` |
 | `/ui/connections` | every signed-in user | Your OAuth connections (one per MCP client you approved): their brains, roles and effective roles; attach a brain (with at most your own grant, optionally as the default) or detach one. Audited as `connection.attach` / `connection.detach` |
 | `/ui/tokens` | every signed-in user | Your personal access tokens: create (the secret is shown once), list, revoke |
 

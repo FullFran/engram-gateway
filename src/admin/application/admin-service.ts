@@ -5,7 +5,8 @@ import { DEFAULT_BRAIN, brainDataDir, parseBrainSlug } from '../../brains/index.
 import type { AdminActor } from '../domain/admin-actor.js';
 import { AdminError } from '../domain/admin-error.js';
 import type { BrainView, GrantView, ServiceAccountView, UserView } from '../domain/views.js';
-import type { AdminClock, AdminStore, AdminTokens, BrainDirectories, BrainRuntime } from './ports.js';
+import type { BrainHealthReport } from '../../health/index.js';
+import type { AdminBrainHealth, AdminClock, AdminStore, AdminTokens, BrainDirectories, BrainRuntime } from './ports.js';
 
 export interface AdminServiceDeps {
   store: AdminStore;
@@ -15,6 +16,8 @@ export interface AdminServiceDeps {
   runtime?: BrainRuntime;
   /** Personal access tokens of service accounts (#7); without it those operations are refused. */
   tokens?: AdminTokens;
+  /** Brain health reports (#18); without it (CLI) they are refused. */
+  health?: AdminBrainHealth;
   /**
    * A refused (`denied`) attempt is recorded once per login and action in
    * this window, so a signed-in non-admin cannot flood the audit log; every
@@ -22,6 +25,11 @@ export interface AdminServiceDeps {
    */
   deniedAuditIntervalMs?: number;
 }
+
+/** A brain's health: its report, or why there is none yet. */
+export type BrainHealthResult =
+  | { ok: true; report: BrainHealthReport & { brain: string } }
+  | { ok: false; reason: 'no_data' | 'busy'; message: string };
 
 export interface ExportOptions {
   /** Refuse an export matching more rows than this (the HTTP API sets it; the CLI does not). */
@@ -117,6 +125,24 @@ export class AdminService {
     });
     await this.deps.runtime?.stop(slug);
     return archived;
+  }
+
+  /**
+   * A brain's health report (#18), read now. Audited as `admin.brain_health`
+   * like the admin health endpoint: `ok` with a report, `error` without one.
+   */
+  brainHealth(actor: AdminActor, slug: string): BrainHealthResult {
+    const op = { action: 'admin.brain_health', brain: slug, target: null };
+    this.authorize(actor, op);
+    const health = this.deps.health;
+    if (!health) throw new AdminError('invalid', 'brain health reports are not available here');
+    const startedAtMs = this.deps.clock.nowMs();
+    const lookup = health.report(slug);
+    this.record(actor, op, lookup.ok ? 'ok' : 'error', startedAtMs, lookup.ok ? {} : { errorKind: lookup.reason });
+    if (lookup.ok) return lookup;
+    if (lookup.reason === 'unknown_brain') throw new AdminError('not_found', lookup.message);
+    if (lookup.reason === 'invalid_arguments') throw new AdminError('invalid', lookup.message);
+    return { ok: false, reason: lookup.reason, message: lookup.message };
   }
 
   // ---- Users ----

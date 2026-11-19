@@ -1,12 +1,15 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
+import { AdminError } from '../../../admin/index.js';
+import type { AdminActor, AdminService } from '../../../admin/index.js';
 import { isSameOrigin } from '../../../auth/index.js';
 import type { Role } from '../../../authz/index.js';
 import { OwnConnectionError, PatError, patJson } from '../../../connections/index.js';
 import type { OwnConnections, PersonalAccessTokens } from '../../../connections/index.js';
 import type { Logger } from '../../../shared/logger.js';
 import { CsrfTokens } from './csrf.js';
-import { renderBarePage, renderPage, securityHeaders } from './layout.js';
+import { alertBox, renderBarePage, renderPage, securityHeaders } from './layout.js';
+import { brainHealthContent, brainsContent } from './views/brains.js';
 import { connectionsContent } from './views/connections.js';
 import { tokensContent } from './views/tokens.js';
 import type { TokensView } from './views/tokens.js';
@@ -34,6 +37,8 @@ export interface UiRouterOptions {
   isAdmin(login: string): boolean;
   tokens: PersonalAccessTokens;
   connections: OwnConnections;
+  /** The admin use cases (#10): they authorize (instance admins only) and audit every admin page. */
+  admin: AdminService;
   /** The user's grants: the brains a token of theirs may use. */
   brainsOf(login: string): { brain: string; role: Role }[];
   clock: { nowMs(): number };
@@ -43,6 +48,7 @@ export interface UiRouterOptions {
 }
 
 const STATUS = { invalid: 400, not_found: 404, conflict: 409 } as const;
+const ADMIN_STATUS = { forbidden: 403, ...STATUS } as const;
 
 interface Context {
   session: { login: string; binding: string };
@@ -202,6 +208,43 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
     options.connections.attach(actor, id, text(body.brain), body.role, body.default === 'on')));
   router.post('/connections/:id/detach', connectionChange((actor, id, body) =>
     options.connections.detach(actor, id, text(body.brain))));
+
+  // ---- Administration (#10): the admin service decides who may, and audits ----
+  const actor = (res: Response): AdminActor => ({ kind: 'user', login: ctx(res).session.login });
+  /** Renders an admin page; a refusal of the service is shown on it with the service's status. */
+  const adminPage = (res: Response, title: string, current: string, render: () => string, status = 200) => {
+    try {
+      send(res, status, title, current, render());
+    } catch (error) {
+      if (!(error instanceof AdminError)) throw error;
+      send(res, ADMIN_STATUS[error.code], title, current, `<h1>${title}</h1>${alertBox(error.message)}`);
+    }
+  };
+  const sendBrains = (res: Response, status: number, extra: { error?: string; slug?: string } = {}) =>
+    adminPage(res, 'Brains', '/ui/brains', () => brainsContent({ csrf: ctx(res).csrf, brains: options.admin.listBrains(actor(res)), ...extra }), status);
+  /** Runs an admin change, then back to `back`; a refusal re-renders the page with the message. */
+  const adminChange = async (res: Response, back: string, change: () => unknown, rerender: (status: number, error: string) => void) => {
+    try {
+      await change();
+      res.redirect(303, back);
+    } catch (error) {
+      if (!(error instanceof AdminError)) throw error;
+      rerender(ADMIN_STATUS[error.code], error.message);
+    }
+  };
+
+  router.get('/brains', (_req, res) => sendBrains(res, 200));
+  router.post('/brains', (req, res, next) => {
+    const slug = text((req.body as Record<string, unknown> | undefined)?.slug);
+    adminChange(res, '/ui/brains', () => options.admin.createBrain(actor(res), slug), (status, error) => sendBrains(res, status, { error, slug })).catch(next);
+  });
+  router.post('/brains/:slug/archive', (req, res, next) => {
+    adminChange(res, '/ui/brains', () => options.admin.archiveBrain(actor(res), req.params.slug ?? ''), (status, error) => sendBrains(res, status, { error })).catch(next);
+  });
+  router.get('/brains/:slug', (req, res) => {
+    const slug = req.params.slug ?? '';
+    adminPage(res, 'Brain health', '/ui/brains', () => brainHealthContent(slug, options.admin.brainHealth(actor(res), slug)));
+  });
 
   router.use((_req, res) => {
     send(res, 404, 'Page not found', '', '<h1>Page not found</h1><p><a href="/ui">Back to the panel</a></p>');
