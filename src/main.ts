@@ -226,6 +226,16 @@ async function main(): Promise<void> {
     backups = { stop: async () => { schedule?.stop(); await control?.close(); } };
   }
 
+  // One admin service (#10) for the JSON API and the web panel (#17).
+  const adminService = new AdminService({
+    store: new SqliteAdminStore(db),
+    dirs: fsBrainDirectories(brainsConfig.brainsRoot),
+    clock: { nowMs: () => Date.now() },
+    runtime: registry,
+    tokens: adminPatPort(pats, { nowMs: () => Date.now() }),
+    health
+  });
+
   const app = createGatewayApp({
     bindHost: config.host,
     ...(config.publicBaseUrl ? { publicBaseUrl: config.publicBaseUrl } : {}),
@@ -262,13 +272,7 @@ async function main(): Promise<void> {
       }
     },
     adminApi: identify => createAdminRouter({
-      service: new AdminService({
-        store: new SqliteAdminStore(db),
-        dirs: fsBrainDirectories(brainsConfig.brainsRoot),
-        clock: { nowMs: () => Date.now() },
-        runtime: registry,
-        tokens: adminPatPort(pats, { nowMs: () => Date.now() })
-      }),
+      service: adminService,
       identify,
       logger
     }),
@@ -279,6 +283,7 @@ async function main(): Promise<void> {
         origin: new URL(auth.settings.issuer).origin,
         isAdmin: login => grants.isAdmin(login),
         tokens: pats,
+        admin: adminService,
         connections: new OwnConnections({ store: connections, grants, clock: { nowMs: () => Date.now() } }),
         brainsOf: login => grants.grantsOf(login),
         clock: { nowMs: () => Date.now() },

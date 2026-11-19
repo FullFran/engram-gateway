@@ -14,7 +14,9 @@ export const ACCOUNT_NAV: readonly NavItem[] = [
 ];
 
 /** Pages for instance admins only; the services refuse anyone else anyway. */
-export const ADMIN_NAV: readonly NavItem[] = [];
+export const ADMIN_NAV: readonly NavItem[] = [
+  { path: '/ui/brains', label: 'Brains' }
+];
 
 /** What every page shows around its content. */
 export interface PageFrame {

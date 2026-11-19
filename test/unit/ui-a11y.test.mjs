@@ -22,6 +22,26 @@ test('axe: every panel page and state has no violation', async t => {
   pages['my connections, two'] = await call('/ui/connections', { as: 'dev' });
   pages['my connections, refused'] = await call(`/ui/connections/${mine}/attach`, { as: 'dev', method: 'POST', form: { csrf, brain: 'beta', role: 'owner' } });
   pages['form too large'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { csrf, name: 'x'.repeat(20_000) } });
+  const bossCsrf = await csrfOf('boss', '/ui/brains');
+  pages['brains'] = await call('/ui/brains', { as: 'boss' });
+  pages['brains, refused'] = await call('/ui/brains', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, slug: 'Bad slug' } });
+  pages['brains, not an admin'] = await call('/ui/brains', { as: 'dev' });
+  s.reports.set('alpha', {
+    ok: true,
+    report: {
+      brain: 'alpha', generatedAt: '2026-11-19T00:00:00.000Z', observations: { live: 3, deleted: 0 },
+      byType: { top: [{ type: 'decision', count: 3 }], otherTypes: 0, otherCount: 0 },
+      noise: { count: 0, sampleIds: [], types: ['checkpoint'], share: 0 },
+      duplicateTitles: { groups: 0, rows: 0, excessRows: 0, sampleIds: [] },
+      pendingRelations: null,
+      pastReviewAfter: { count: 1, sampleIds: [2] },
+      wiki: { status: 'unavailable', reason: 'no wiki yet' },
+      semanticIndex: { status: 'unavailable', reason: 'no index yet' }
+    }
+  });
+  s.reports.set('beta', { ok: false, reason: 'no_data', message: 'brain beta has no engram.db yet (nothing saved)' });
+  pages['brain health'] = await call('/ui/brains/alpha', { as: 'boss' });
+  pages['brain health, no data'] = await call('/ui/brains/beta', { as: 'boss' });
   pages['not found'] = await call('/ui/nope', { as: 'dev' });
   pages['form refused'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { name: 'x' } });
   pages['signed out'] = await call('/ui/tokens', { method: 'POST', form: { name: 'x' } });

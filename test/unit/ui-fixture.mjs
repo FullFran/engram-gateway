@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
 import { JSDOM } from 'jsdom';
+import { AdminService, SqliteAdminStore, fsBrainDirectories } from '../../dist/admin/index.js';
 import { SqliteAuditLog } from '../../dist/audit/index.js';
 import { HttpRequestAuthenticator } from '../../dist/auth/index.js';
 import { SqliteGrantRepository, bootstrapAccess } from '../../dist/authz/index.js';
@@ -37,8 +38,25 @@ export function uiSetup(t) {
   const connections = new SqliteConnectionStore(db);
   const auditLog = new SqliteAuditLog(db);
   const pats = new PersonalAccessTokens({ store: new SqlitePatStore(db, connections), grants, secrets: nodePatSecrets, clock, audit: auditLog });
-  const audit = () => [...auditLog.read()].map(row => ({ actor: row.actorLogin ?? row.actorId, action: row.action, target: row.target, outcome: row.outcome }));
-  return { db, grants, clock, connections, pats, audit };
+  const audit = () => [...auditLog.read()].map(row => ({ actor: row.actorLogin ?? row.actorId, action: row.action, brain: row.brain, target: row.target, outcome: row.outcome }));
+  // The running gateway's view of brains: alpha's child runs and serves a request, beta's runs idle.
+  const runtime = {
+    stopped: [],
+    status: slug => (slug === 'alpha' ? { live: true, idle: false } : slug === 'beta' ? { live: true, idle: true } : { live: false, idle: false }),
+    async stop(slug) { this.stopped.push(slug); }
+  };
+  /** Health reports by brain; a brain missing here is unknown. */
+  const reports = new Map();
+  const health = {
+    report: brain => {
+      if (!reports.has(brain)) return { ok: false, reason: 'unknown_brain', message: `unknown brain ${JSON.stringify(brain)}` };
+      return reports.get(brain);
+    }
+  };
+  const admin = new AdminService({
+    store: new SqliteAdminStore(db), dirs: fsBrainDirectories(join(dir, 'brains')), clock, runtime, health
+  });
+  return { db, dir, grants, clock, connections, pats, audit, runtime, reports, admin };
 }
 
 /**
@@ -64,6 +82,7 @@ export async function uiApp(t, s, { sessionCookies = true } = {}) {
       identify, origin: ORIGIN, logger: quiet, clock: s.clock,
       isAdmin: login => s.grants.isAdmin(login),
       tokens: s.pats,
+      admin: s.admin,
       connections: new OwnConnections({ store: s.connections, grants: s.grants, clock: s.clock }),
       brainsOf: login => s.grants.grantsOf(login)
     })

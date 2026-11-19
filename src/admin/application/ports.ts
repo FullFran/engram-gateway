@@ -1,3 +1,4 @@
+import type { BrainHealthLookup } from '../../health/index.js';
 import type { AuditEvent, AuditFilter, AuditRecord } from '../../audit/index.js';
 import type { Role } from '../../authz/index.js';
 import type { AdminActor } from '../domain/admin-actor.js';
@@ -68,4 +69,9 @@ export interface AdminTokens {
   list(owner: string): object[];
   create(actor: AdminActor, owner: string, request: { name: unknown; brains: unknown; scope: unknown; expiresInDays: unknown }): { token: string; id: number };
   revoke(actor: AdminActor, owner: string, id: number): object;
+}
+
+/** A brain's health report (#18): the admin layer authorizes and audits reading it. */
+export interface AdminBrainHealth {
+  report(brain: string): BrainHealthLookup;
 }
