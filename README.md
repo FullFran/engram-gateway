@@ -784,6 +784,14 @@ See [docs/health-report.md](docs/health-report.md) for every finding and
 [docs/gateway-tools.md](docs/gateway-tools.md) for how the gateway serves its
 own tools.
 
+### Curated wiki
+
+Per brain, a human-approved wiki next to the journal (#16): agents read a
+bounded pack of the journal (`brain_compile_pack`) and propose typed pages
+and links citing observation `sync_id`s (`brain_propose`, writers). Stored
+in the brain's own `wiki.db`, never in `engram.db`; included in backups.
+See [docs/wiki.md](docs/wiki.md).
+
 ## Develop
 
 ```sh
