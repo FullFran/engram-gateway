@@ -60,7 +60,8 @@ function world(t) {
   const clock = fakeClock();
   const random = fakeRandom();
   const s = settings({ resources: [BASE, `${BASE}/default`, `${BASE}/alpha`, `${BASE}/beta`, `${BASE}/gamma`] });
-  const policy = new GrantAccessPolicy(grants, s.resources);
+  const activeBrains = new SqliteBrainRepository(db);
+  const policy = new GrantAccessPolicy(grants, BASE, { isActive: slug => activeBrains.findActive(slug) !== undefined });
   const store = new SqliteTokenStore(db, clock, random);
   const connections = new SqliteConnectionStore(db);
   const consent = new ConnectionConsentService(grants, connections, BASE, 'default');

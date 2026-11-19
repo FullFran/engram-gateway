@@ -71,9 +71,10 @@ async function main(): Promise<void> {
   const brainRepo = new SqliteBrainRepository(db);
   const brains = bootstrapBrains(brainRepo, brainsConfig, logger);
 
-  // Every brain is its own protected resource: `/mcp/<slug>`; `/mcp` stays the default brain's.
-  const resourcePaths = [MCP_HTTP_PATH, ...brains.map(brain => `${MCP_HTTP_PATH}/${brain.slug}`)];
-  const authConfig = resolveAuthConfig(config.host, process.env, { resourcePaths });
+  // Every active brain is its own protected resource, `/mcp/<slug>`; `/mcp`
+  // stays the default brain's. Only `/mcp` is configured: the brain resources
+  // are read from the brains table per request by the access policy (#52).
+  const authConfig = resolveAuthConfig(config.host, process.env, { resourcePaths: [MCP_HTTP_PATH] });
   if (authConfig.mode === 'oauth') {
     for (const warning of authConfig.warnings) logger.warn(warning);
   } else if (authConfig.insecure) {
@@ -106,7 +107,7 @@ async function main(): Promise<void> {
   const auth = authConfig.mode === 'oauth'
     ? buildAuth(authConfig, {
       logger, db,
-      policy: new GrantAccessPolicy(grants, authConfig.settings.resources),
+      policy: new GrantAccessPolicy(grants, authConfig.settings.resources[0]!, { isActive: slug => brainRepo.findActive(slug) !== undefined }),
       connections: new ConnectionConsentService(grants, connections, authConfig.settings.resources[0]!, DEFAULT_BRAIN),
       extraProviders: [patIdentityProvider(pats)]
     })

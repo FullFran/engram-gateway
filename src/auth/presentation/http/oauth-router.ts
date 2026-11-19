@@ -80,22 +80,32 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
   const authorizeLimiter = rateLimit({ windowMs: 60_000, max: 60, name: 'authorization' });
 
   // ---- Metadata ----
+  const metadataDocument = (resource: string) => ({
+    resource,
+    authorization_servers: [issuer],
+    scopes_supported: [MEMORY_SCOPE],
+    bearer_methods_supported: ['header'],
+    resource_name: deps.resourceName
+  });
   for (const resource of settings.resources) {
     const document = (_req: Request, res: Response): void => {
       res.setHeader('Cache-Control', 'public, max-age=300');
-      res.json({
-        resource,
-        authorization_servers: [issuer],
-        scopes_supported: [MEMORY_SCOPE],
-        bearer_methods_supported: ['header'],
-        resource_name: deps.resourceName
-      });
+      res.json(metadataDocument(resource));
     };
     const path = resourceMetadataPath(settings, resource);
     router.get(path, document);
     const byPath = `/.well-known/oauth-protected-resource${new URL(resource).pathname}`;
     if (byPath !== path) router.get(byPath, document);
   }
+  // Any other resource the access policy knows right now (e.g. a brain
+  // created at runtime, #52): its document by path, gone once it is not.
+  router.get('/.well-known/oauth-protected-resource/*', (req, res, next) => {
+    const resource = new URL(req.path.slice('/.well-known/oauth-protected-resource'.length), settings.resources[0]).href;
+    if (!deps.policy.describeResource(resource)) return next();
+    // Not cached: the resource goes away when its brain is archived.
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(metadataDocument(resource));
+  });
   router.get('/.well-known/oauth-authorization-server', (_req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=300');
     res.json({
