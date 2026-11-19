@@ -12,9 +12,11 @@ export type { LinkItem, LinkType, PageKind, ProposalItem, UpsertPageItem, WikiEr
 export { computeWarnings } from './domain/warnings.js';
 export type { WarningCode, WarningView, WikiWarning } from './domain/warnings.js';
 export { parseProposeInput } from './domain/proposal-input.js';
-export type { JournalEntry, JournalReader, PageSummary, StoredProposal, WikiServiceDeps, WikiStore } from './application/ports.js';
+export { DECISION_ACTIONS, PROPOSALS_LIMITS, fingerprintMaterial, parseDecideInput, parseProposalsInput, parseReviewInput } from './domain/review.js';
+export type { DecideInput, DecisionAction, ProposalsInput, ReviewInput, ReviewState } from './domain/review.js';
+export type { DecisionRecord, JournalEntry, JournalReader, PageSummary, ProposalListing, StoredItem, StoredProposal, WikiServiceDeps, WikiStore } from './application/ports.js';
 export { PACK_LIMITS, WIKI_TOOLS, WikiService } from './application/wiki-service.js';
-export type { CompilePack, ProposalReceipt, WikiActor } from './application/wiki-service.js';
+export type { CompilePack, DecisionReceipt, ProposalReceipt, ProposalReview, WikiActor } from './application/wiki-service.js';
 export { openEngramJournal } from './infrastructure/engram-journal.js';
 export { WIKI_DB_FILE, openSqliteWikiStore } from './infrastructure/sqlite-wiki-store.js';
 

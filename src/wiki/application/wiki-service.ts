@@ -1,15 +1,20 @@
+import { createHash } from 'node:crypto';
 import { atLeast, type Role } from '../../authz/domain/role.js';
 import { requiredRole } from '../../authz/domain/tool-roles.js';
 import { NOISE_TYPES } from '../../health/domain/report.js';
 import { parseProposeInput } from '../domain/proposal-input.js';
+import { fingerprintMaterial, parseDecideInput, parseProposalsInput, parseReviewInput, type DecisionAction } from '../domain/review.js';
 import { computeWarnings, type WikiWarning } from '../domain/warnings.js';
-import { WikiError, touchedSlugs, type ProposalItem } from '../domain/wiki.js';
-import type { JournalEntry, JournalReader, PageSummary, StoredProposal, WikiServiceDeps, WikiStore } from './ports.js';
+import { WikiError, touchedSlugs, type ProposalItem, type ProposalStatus } from '../domain/wiki.js';
+import type { DecisionRecord, JournalEntry, JournalReader, PageSummary, ProposalListing, StoredItem, StoredProposal, WikiServiceDeps, WikiStore } from './ports.js';
 
 /** The tools (and use cases) of the wiki; their roles live in GATEWAY_TOOL_ROLES (src/authz). */
 export const WIKI_TOOLS = Object.freeze({
   compilePack: 'brain_compile_pack',
-  propose: 'brain_propose'
+  propose: 'brain_propose',
+  proposals: 'brain_proposals',
+  review: 'brain_review',
+  decide: 'brain_decide'
 });
 
 /**
@@ -46,6 +51,31 @@ export interface ProposalReceipt {
   revision: number;
   items: Array<{ id: number; op: ProposalItem['op']; slugs: string[] }>;
   warnings: WikiWarning[];
+}
+
+export interface ProposalReview {
+  proposalId: number;
+  revision: number;
+  status: ProposalStatus;
+  proposer: string | null;
+  summary: string;
+  /** Pending items, each with the current revision (null: no page) of the pages it touches. */
+  items: Array<{ id: number; item: ProposalItem; current: Array<{ slug: string; revision: number | null }> }>;
+  warnings: WikiWarning[];
+  /** The item ids the fingerprint covers. */
+  selected: number[];
+  /** Pass to brain_decide to approve exactly this selection, as it is now. */
+  fingerprint: string;
+  decisions: DecisionRecord[];
+}
+
+export interface DecisionReceipt {
+  decisionId: number;
+  proposalId: number;
+  action: DecisionAction;
+  status: ProposalStatus;
+  applied: number[];
+  pending: number[];
 }
 
 /**
@@ -123,6 +153,98 @@ export class WikiService {
     }
   }
 
+  proposals(actor: WikiActor, brain: string, args: unknown): { proposals: ProposalListing[] } {
+    authorize(actor, WIKI_TOOLS.proposals);
+    const input = parseProposalsInput(args);
+    const wiki = this.deps.openWiki(this.dataDir(brain), { create: false });
+    try {
+      return { proposals: wiki?.proposals(input.status !== undefined ? { status: input.status } : {}, input.limit) ?? [] };
+    } finally {
+      wiki?.close();
+    }
+  }
+
+  /** A proposal as a reviewer reads it, with the fingerprint that binds an approval to this reading. */
+  review(actor: WikiActor, brain: string, args: unknown): ProposalReview {
+    authorize(actor, WIKI_TOOLS.review);
+    const input = parseReviewInput(args);
+    const dataDir = this.dataDir(brain);
+    const wiki = this.deps.openWiki(dataDir, { create: false });
+    if (!wiki) throw new WikiError('not_found', `no proposal ${input.proposalId}`);
+    try {
+      return wiki.transaction(() => {
+        const proposal = findProposal(wiki, input.proposalId);
+        const pending = proposal.items.filter(entry => entry.state === 'pending');
+        const selected = selectItems(proposal, input.itemIds);
+        const cited = this.citations(dataDir, pending.map(entry => entry.item));
+        return {
+          proposalId: proposal.id,
+          revision: proposal.revision,
+          status: proposal.status,
+          proposer: proposal.proposer,
+          summary: proposal.summary,
+          items: pending.map(({ id, item }) => ({ id, item, current: touchedSlugs(item).map(slug => ({ slug, revision: wiki.page(slug)?.revision ?? null })) })),
+          warnings: warningsFor(wiki, proposal, cited),
+          selected: selected.map(entry => entry.id),
+          fingerprint: fingerprint(wiki, proposal, selected),
+          decisions: wiki.decisions(proposal.id)
+        };
+      });
+    } finally {
+      wiki.close();
+    }
+  }
+
+  /**
+   * An owner's decision. `approve` applies the selected items (default: every
+   * pending one) in proposal order, in one transaction, only when the
+   * fingerprint still matches what was reviewed; any item that cannot be
+   * applied rolls the whole decision back. Unselected items stay pending.
+   * `return` sends the proposal back to its proposer; `reject` closes it.
+   */
+  decide(actor: WikiActor, brain: string, args: unknown): DecisionReceipt {
+    authorize(actor, WIKI_TOOLS.decide);
+    const input = parseDecideInput(args);
+    const wiki = this.deps.openWiki(this.dataDir(brain), { create: false });
+    if (!wiki) throw new WikiError('not_found', `no proposal ${input.proposalId}`);
+    try {
+      return wiki.transaction(() => {
+        const proposal = findProposal(wiki, input.proposalId);
+        if (proposal.status !== 'open') throw new WikiError('conflict', `proposal ${proposal.id} is ${proposal.status}${proposal.status === 'returned' ? '; its proposer revises it first' : ''}`);
+        const atMs = this.deps.nowMs();
+        const pendingIds = proposal.items.filter(entry => entry.state === 'pending').map(entry => entry.id);
+        const record = (action: DecisionAction, itemIds: number[], print: string | null) => wiki.insertDecision({
+          proposalId: proposal.id, proposalRevision: proposal.revision, action, itemIds, fingerprint: print, decidedBy: actor.login ?? null, comment: input.comment ?? null, atMs
+        });
+        if (input.action === 'return') {
+          const decisionId = record('return', [], null);
+          wiki.setProposalStatus(proposal.id, 'returned', atMs);
+          return { decisionId, proposalId: proposal.id, action: input.action, status: 'returned', applied: [], pending: pendingIds };
+        }
+        if (input.action === 'reject') {
+          const decisionId = record('reject', pendingIds, null);
+          wiki.setItemsState(pendingIds, 'rejected', decisionId);
+          wiki.setProposalStatus(proposal.id, 'rejected', atMs);
+          return { decisionId, proposalId: proposal.id, action: input.action, status: 'rejected', applied: [], pending: [] };
+        }
+        const selected = selectItems(proposal, input.itemIds);
+        if (fingerprint(wiki, proposal, selected) !== input.fingerprint) {
+          throw new WikiError('stale', `proposal ${proposal.id} or the pages it touches changed since it was reviewed; review it again`);
+        }
+        const applied = selected.map(entry => entry.id);
+        const decisionId = record('approve', applied, input.fingerprint!);
+        for (const entry of selected) applyItem(wiki, entry, { decisionId, createdBy: proposal.proposer, atMs });
+        wiki.setItemsState(applied, 'applied', decisionId);
+        const pending = pendingIds.filter(id => !applied.includes(id));
+        const status: ProposalStatus = pending.length === 0 ? 'closed' : 'open';
+        wiki.setProposalStatus(proposal.id, status, atMs);
+        return { decisionId, proposalId: proposal.id, action: input.action, status, applied, pending };
+      });
+    } finally {
+      wiki.close();
+    }
+  }
+
   private dataDir(brain: string): string {
     const dataDir = this.deps.dataDirOf(brain);
     if (dataDir === undefined) throw new WikiError('not_found', `unknown brain ${JSON.stringify(brain)}`);
@@ -153,6 +275,50 @@ function authorize(actor: WikiActor, tool: string): void {
   if (actor.role === undefined) return;
   const need = requiredRole(tool);
   if (need === undefined || !atLeast(actor.role, need)) throw new WikiError('forbidden', `${tool} needs the ${need ?? 'unknown'} role on this brain`);
+}
+
+function findProposal(wiki: WikiStore, id: number): StoredProposal {
+  const proposal = wiki.proposal(id);
+  if (!proposal) throw new WikiError('not_found', `no proposal ${id}`);
+  return proposal;
+}
+
+/** The selected pending items in proposal order; every pending item when `itemIds` is undefined. */
+function selectItems(proposal: StoredProposal, itemIds: readonly number[] | undefined): StoredItem[] {
+  const pending = proposal.items.filter(entry => entry.state === 'pending');
+  if (itemIds === undefined) return pending;
+  const byId = new Map(pending.map(entry => [entry.id, entry]));
+  for (const id of itemIds) if (!byId.has(id)) throw new WikiError('invalid', `invalid arguments: item ${id} is not a pending item of proposal ${proposal.id}`);
+  return pending.filter(entry => itemIds.includes(entry.id));
+}
+
+function fingerprint(wiki: WikiStore, proposal: StoredProposal, selected: readonly StoredItem[]): string {
+  const material = fingerprintMaterial(proposal.id, proposal.revision, selected, {
+    page: slug => wiki.page(slug)?.revision ?? null,
+    hasLiveLink: (from, to, type) => wiki.hasLiveLink(from, to, type)
+  });
+  return createHash('sha256').update(material).digest('hex');
+}
+
+/** Applies one approved item; throws (rolling the decision back) when it cannot apply as a whole. */
+function applyItem(wiki: WikiStore, { id, item }: StoredItem, by: { decisionId: number; createdBy: string | null; atMs: number }): void {
+  if (item.op === 'upsert_page') {
+    wiki.appendRevision(item, by);
+    return;
+  }
+  const fromId = wiki.livePageId(item.from);
+  const toId = wiki.livePageId(item.to);
+  for (const [slug, pageId] of [[item.from, fromId], [item.to, toId]] as const) {
+    if (pageId === undefined) throw new WikiError('conflict', `item ${id}: page ${slug} does not exist (approve it in the same decision); nothing was applied`);
+  }
+  const existing = wiki.liveLinkId(item);
+  if (item.op === 'link') {
+    if (existing !== undefined) throw new WikiError('conflict', `item ${id}: ${item.from} already has a ${item.type} link to ${item.to}; nothing was applied`);
+    wiki.insertLink(item, fromId!, toId!, by.decisionId);
+  } else {
+    if (existing === undefined) throw new WikiError('conflict', `item ${id}: there is no ${item.type} link from ${item.from} to ${item.to}; nothing was applied`);
+    wiki.removeLink(existing, by.decisionId);
+  }
 }
 
 function mayRevise(actor: WikiActor, proposal: StoredProposal): boolean {
