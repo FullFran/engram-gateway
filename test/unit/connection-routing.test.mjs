@@ -15,7 +15,8 @@ import express from 'express';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { GATEWAY_TOOL_ROLES, TOOL_ROLES, SqliteGrantRepository, bootstrapAccess, createToolAccess } from '../../dist/authz/index.js';
 import { CONNECTION_TOOL_KINDS } from '../../dist/authz/index.js';
-import { createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet, parseRemoteMapping } from '../../dist/gateway-tools/index.js';
+import { createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet, createWikiTools, parseRemoteMapping } from '../../dist/gateway-tools/index.js';
+import { createSqliteWikiService } from '../../dist/wiki/index.js';
 import { SqliteAuditLog, toolCallRecorder } from '../../dist/audit/index.js';
 import { BrainRegistry, SqliteBrainRepository } from '../../dist/brains/index.js';
 import { createConnectionServer, createEngramBridge } from '../../dist/bridge/index.js';
@@ -40,7 +41,7 @@ const CHOICE = { name: 'c', defaultBrain: 'alpha', brains: [{ brain: 'alpha', ro
 /** Owner on `slow`: the connection may attach and detach (#27: owner role on the connection). */
 const MANAGER = { name: 'c', defaultBrain: 'alpha', brains: [...CHOICE.brains, { brain: 'slow', role: 'owner' }] };
 
-async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefault = true, maxFanOutsPerLogin, kind = 'token', tools = false, choice = CHOICE, remotes = '' } = {}) {
+async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefault = true, maxFanOutsPerLogin, kind = 'token', tools = false, choice = CHOICE, remotes = '', wiki = false } = {}) {
   const BRAINS = withDefault ? ALL : ALL.filter(slug => slug !== 'default');
   const dir = mkdtempSync(join(tmpdir(), 'engram-gateway-connection-routing-'));
   const db = openGatewayDatabase(join(dir, 'gateway.db'));
@@ -64,7 +65,8 @@ async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefau
   const gatewayTools = createGatewayToolSet(
     [
       createBrainHealthTool({ report: brain => { healthAsked.push(brain); return { ok: false, reason: 'no_data', message: `no data for ${brain}` }; } }),
-      createBrainResolveTool({ rules: parseRemoteMapping(remotes), connections: new ConnectionAdmin(grants, connections) })
+      createBrainResolveTool({ rules: parseRemoteMapping(remotes), connections: new ConnectionAdmin(grants, connections) }),
+      ...(wiki ? createWikiTools(createSqliteWikiService({ dataDirOf: slug => repo.findActive(slug)?.dataDir, isQuiesced: () => false })) : [])
     ],
     { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES }
   );
@@ -224,6 +226,18 @@ test('gateway tools are served on /mcp too, routed by `brain` like engram tools,
   const result = await client.callTool({ name: 'brain_health', arguments: { brain: 'beta' } });
   assert.match(result.content.map(item => item.text).join('\n'), /no data for beta/);
   assert.deepEqual(g.healthAsked, ['beta']);
+});
+
+test('wiki tools are served on /mcp with the `brain` argument, routed to that brain and stripped before the tool reads its arguments', async t => {
+  const g = await gateway(t, { wiki: true });
+  const client = await g.connect();
+  const tools = (await client.listTools()).tools;
+  const pageTool = tools.find(tool => tool.name === 'brain_page');
+  assert.deepEqual(brainEnum(pageTool), ['alpha', 'beta']);
+  assert.ok(tools.some(tool => tool.name === 'brain_propose') && !tools.some(tool => tool.name === 'brain_decide'), 'the connection is writer: no owner-only wiki tool');
+  const result = await client.callTool({ name: 'brain_page', arguments: { brain: 'beta', slug: 'nope' } });
+  assert.equal(result.isError, true);
+  assert.match(result.content.map(item => item.text).join('\n'), /no page nope/, 'reached the wiki with brain beta, and `brain` was not an unknown field');
 });
 
 // --- review fixes (#36/#38) ---

@@ -2,8 +2,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { immediateTransaction, openSqliteDatabase } from '../../shared/sqlite-database.js';
-import type { ItemState, LinkItem, PageKind, ProposalItem, ProposalStatus, UpsertPageItem } from '../domain/wiki.js';
-import type { DecisionRecord, PageSummary, ProposalListing, StoredItem, StoredProposal, WikiStore } from '../application/ports.js';
+import type { ItemState, LinkItem, LinkType, PageKind, ProposalItem, ProposalStatus, UpsertPageItem } from '../domain/wiki.js';
+import type { DecisionEffects, DecisionRecord, NeighborLink, PageRevision, PageSummary, ProposalListing, RevisionEntry, StoredItem, StoredProposal, WikiStore } from '../application/ports.js';
 import { WIKI_MIGRATIONS } from './wiki-migrations.js';
 
 export const WIKI_DB_FILE = 'wiki.db';
@@ -125,22 +125,72 @@ class SqliteWikiStore implements WikiStore {
   }
 
   decisions(proposalId: number): DecisionRecord[] {
-    return this.db.prepare('SELECT * FROM decisions WHERE proposal_id = ? ORDER BY id').all(proposalId).map(row => ({
-      id: Number(row.id),
-      action: String(row.action) as DecisionRecord['action'],
-      proposalRevision: Number(row.proposal_revision),
-      itemIds: JSON.parse(String(row.item_ids)) as number[],
-      decidedBy: row.decided_by === null ? null : String(row.decided_by),
-      comment: row.comment === null ? null : String(row.comment),
-      decidedAtMs: Number(row.decided_at_ms),
-      undoneBy: row.undone_by === null ? null : Number(row.undone_by)
-    }));
+    return this.db.prepare('SELECT * FROM decisions WHERE proposal_id = ? ORDER BY id').all(proposalId).map(toDecision);
   }
 
-  insertDecision(d: { proposalId: number; proposalRevision: number; action: DecisionRecord['action']; itemIds: readonly number[]; fingerprint: string | null; decidedBy: string | null; comment: string | null; atMs: number }): number {
+  decision(id: number): DecisionRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM decisions WHERE id = ?').get(id);
+    return row === undefined ? undefined : toDecision(row);
+  }
+
+  insertDecision(d: { proposalId: number; proposalRevision: number; action: DecisionRecord['action']; itemIds: readonly number[]; fingerprint: string | null; decidedBy: string | null; comment: string | null; atMs: number; undoes?: number }): number {
     return Number(this.db.prepare(
-      'INSERT INTO decisions (proposal_id, proposal_revision, action, item_ids, fingerprint, decided_by, comment, decided_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(d.proposalId, d.proposalRevision, d.action, JSON.stringify(d.itemIds), d.fingerprint, d.decidedBy, d.comment, d.atMs).lastInsertRowid);
+      'INSERT INTO decisions (proposal_id, proposal_revision, action, item_ids, fingerprint, decided_by, comment, decided_at_ms, undoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(d.proposalId, d.proposalRevision, d.action, JSON.stringify(d.itemIds), d.fingerprint, d.decidedBy, d.comment, d.atMs, d.undoes ?? null).lastInsertRowid);
+  }
+
+  decisionEffects(decisionId: number): DecisionEffects {
+    const revisions = this.db.prepare(
+      `SELECT r.page_id, p.slug, r.id AS revision_id, p.current_revision_id,
+              (SELECT prev.id FROM page_revisions prev WHERE prev.page_id = r.page_id AND prev.rev_no < r.rev_no ORDER BY prev.rev_no DESC LIMIT 1) AS previous_id
+       FROM page_revisions r JOIN pages p ON p.id = r.page_id WHERE r.decision_id = ? ORDER BY p.slug`
+    ).all(decisionId).map(row => ({
+      pageId: Number(row.page_id),
+      slug: String(row.slug),
+      revisionId: Number(row.revision_id),
+      currentRevisionId: row.current_revision_id === null ? null : Number(row.current_revision_id),
+      previousRevisionId: row.previous_id === null ? null : Number(row.previous_id)
+    }));
+    const links = (column: 'added_by_decision' | 'removed_by_decision') => this.db.prepare(
+      `SELECT l.id, f.slug AS from_slug, t.slug AS to_slug, l.type, l.removed_by_decision FROM links l
+       JOIN pages f ON f.id = l.from_page JOIN pages t ON t.id = l.to_page WHERE l.${column} = ? ORDER BY l.id`
+    ).all(decisionId);
+    return {
+      revisions,
+      linksAdded: links('added_by_decision').map(row => ({
+        id: Number(row.id), from: String(row.from_slug), to: String(row.to_slug), type: String(row.type) as LinkType,
+        removedBy: row.removed_by_decision === null ? null : Number(row.removed_by_decision)
+      })),
+      linksRemoved: links('removed_by_decision').map(row => ({ id: Number(row.id), from: String(row.from_slug), to: String(row.to_slug), type: String(row.type) as LinkType }))
+    };
+  }
+
+  liveLinksTouching(pageId: number, exceptDecision: number): number[] {
+    return this.db.prepare(
+      'SELECT id FROM links WHERE removed_by_decision IS NULL AND (from_page = ? OR to_page = ?) AND added_by_decision IS NOT ? ORDER BY id'
+    ).all(pageId, pageId, exceptDecision).map(row => Number(row.id));
+  }
+
+  copyRevision(pageId: number, revisionId: number, by: { decisionId: number; createdBy: string | null; atMs: number }): number {
+    const revNo = Number(this.db.prepare('SELECT COALESCE(MAX(rev_no), 0) + 1 AS n FROM page_revisions WHERE page_id = ?').get(pageId)!.n);
+    const id = this.db.prepare(
+      `INSERT INTO page_revisions (page_id, rev_no, kind, title, body, citations, decision_id, created_by, created_at_ms)
+       SELECT page_id, ?, kind, title, body, citations, ?, ?, ? FROM page_revisions WHERE id = ?`
+    ).run(revNo, by.decisionId, by.createdBy, by.atMs, revisionId).lastInsertRowid;
+    this.db.prepare('UPDATE pages SET current_revision_id = ? WHERE id = ?').run(id, pageId);
+    return revNo;
+  }
+
+  clearCurrentRevision(pageId: number): void {
+    this.db.prepare('UPDATE pages SET current_revision_id = NULL WHERE id = ?').run(pageId);
+  }
+
+  restoreLink(linkId: number, decisionId: number): void {
+    this.db.prepare('INSERT INTO links (from_page, to_page, type, citations, added_by_decision) SELECT from_page, to_page, type, citations, ? FROM links WHERE id = ?').run(decisionId, linkId);
+  }
+
+  markUndone(decisionId: number, undoId: number): void {
+    this.db.prepare('UPDATE decisions SET undone_by = ? WHERE id = ?').run(undoId, decisionId);
   }
 
   appendRevision(item: UpsertPageItem, by: { decisionId: number; createdBy: string | null; atMs: number }): number {
@@ -185,15 +235,102 @@ class SqliteWikiStore implements WikiStore {
     this.db.prepare('UPDATE proposals SET status = ?, updated_at_ms = ? WHERE id = ?').run(status, atMs, id);
   }
 
-  pages(limit: number): { pages: PageSummary[]; total: number } {
-    const total = Number(this.db.prepare(`SELECT COUNT(*) AS n FROM ${LIVE_PAGE}`).get()?.n ?? 0);
-    const pages = this.db.prepare(`SELECT p.slug, r.kind, r.title, r.rev_no FROM ${LIVE_PAGE} ORDER BY p.slug LIMIT ?`).all(limit).map(toSummary);
+  pages(limit: number, filter: { query?: string; kind?: PageKind } = {}): { pages: PageSummary[]; total: number } {
+    const where: string[] = [];
+    const params: SQLInputValue[] = [];
+    if (filter.query !== undefined) {
+      const pattern = `%${filter.query.toLowerCase().replace(/[\\%_]/g, ch => `\\${ch}`)}%`;
+      where.push("(p.slug LIKE ? ESCAPE '\\' OR lower(r.title) LIKE ? ESCAPE '\\')");
+      params.push(pattern, pattern);
+    }
+    if (filter.kind !== undefined) {
+      where.push('r.kind = ?');
+      params.push(filter.kind);
+    }
+    const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const total = Number(this.db.prepare(`SELECT COUNT(*) AS n FROM ${LIVE_PAGE} ${clause}`).get(...params)?.n ?? 0);
+    const pages = this.db.prepare(`SELECT p.slug, r.kind, r.title, r.rev_no FROM ${LIVE_PAGE} ${clause} ORDER BY p.slug LIMIT ?`).all(...params, limit).map(toSummary);
     return { pages, total };
+  }
+
+  pageRevision(slug: string, revision?: number): PageRevision | undefined {
+    const row = revision === undefined
+      ? this.db.prepare(`SELECT p.slug, r.* FROM ${LIVE_PAGE} WHERE p.slug = ?`).get(slug)
+      : this.db.prepare(
+        `SELECT p.slug, r.* FROM pages p JOIN page_revisions r ON r.page_id = p.id WHERE p.slug = ? AND p.current_revision_id IS NOT NULL AND r.rev_no = ?`
+      ).get(slug, revision);
+    if (row === undefined) return undefined;
+    return {
+      slug: String(row.slug),
+      kind: String(row.kind) as PageKind,
+      title: String(row.title),
+      body: String(row.body),
+      citations: JSON.parse(String(row.citations)) as string[],
+      revision: Number(row.rev_no),
+      createdBy: row.created_by === null ? null : String(row.created_by),
+      createdAtMs: Number(row.created_at_ms),
+      decisionId: row.decision_id === null ? null : Number(row.decision_id)
+    };
+  }
+
+  pageHistory(slug: string, limit: number): { history: RevisionEntry[]; total: number } {
+    const total = Number(this.db.prepare('SELECT COUNT(*) AS n FROM page_revisions r JOIN pages p ON p.id = r.page_id WHERE p.slug = ?').get(slug)?.n ?? 0);
+    const history = this.db.prepare(
+      'SELECT r.rev_no, r.title, r.created_by, r.created_at_ms, r.decision_id FROM page_revisions r JOIN pages p ON p.id = r.page_id WHERE p.slug = ? ORDER BY r.rev_no DESC LIMIT ?'
+    ).all(slug, limit).map(row => ({
+      revision: Number(row.rev_no),
+      title: String(row.title),
+      createdBy: row.created_by === null ? null : String(row.created_by),
+      createdAtMs: Number(row.created_at_ms),
+      decisionId: row.decision_id === null ? null : Number(row.decision_id)
+    }));
+    return { history, total };
+  }
+
+  neighbors(slug: string, types: readonly LinkType[] | undefined, limit: number): { links: NeighborLink[]; more: boolean } {
+    const typeClause = types ? `AND l.type IN (${types.map(() => '?').join(', ')})` : '';
+    const typeParams: SQLInputValue[] = types ? [...types] : [];
+    const rows = this.db.prepare(
+      `SELECT * FROM (
+         SELECT 0 AS dir, l.id, o.slug, r.title, l.type, l.citations FROM links l JOIN pages s ON s.id = l.from_page
+           JOIN pages o ON o.id = l.to_page JOIN page_revisions r ON r.id = o.current_revision_id
+           WHERE s.slug = ? AND l.removed_by_decision IS NULL ${typeClause}
+         UNION ALL
+         SELECT 1 AS dir, l.id, o.slug, r.title, l.type, l.citations FROM links l JOIN pages s ON s.id = l.to_page
+           JOIN pages o ON o.id = l.from_page JOIN page_revisions r ON r.id = o.current_revision_id
+           WHERE s.slug = ? AND l.removed_by_decision IS NULL ${typeClause}
+       ) ORDER BY dir, id LIMIT ?`
+    ).all(slug, ...typeParams, slug, ...typeParams, limit + 1);
+    return {
+      links: rows.slice(0, limit).map(row => ({
+        direction: Number(row.dir) === 0 ? 'out' : 'in',
+        slug: String(row.slug),
+        title: String(row.title),
+        type: String(row.type) as LinkType,
+        citations: JSON.parse(String(row.citations)) as string[]
+      })),
+      more: rows.length > limit
+    };
   }
 
   close(): void {
     this.db.close();
   }
+}
+
+function toDecision(row: Record<string, SQLInputValue>): DecisionRecord {
+  return {
+    id: Number(row.id),
+    proposalId: Number(row.proposal_id),
+    action: String(row.action) as DecisionRecord['action'],
+    proposalRevision: Number(row.proposal_revision),
+    itemIds: JSON.parse(String(row.item_ids)) as number[],
+    decidedBy: row.decided_by === null ? null : String(row.decided_by),
+    comment: row.comment === null ? null : String(row.comment),
+    decidedAtMs: Number(row.decided_at_ms),
+    undoneBy: row.undone_by === null ? null : Number(row.undone_by),
+    undoes: row.undoes === null ? null : Number(row.undoes)
+  };
 }
 
 function toSummary(row: Record<string, SQLInputValue>): PageSummary {

@@ -61,6 +61,12 @@ with "being restored; retry shortly", so a decision never races the file swap.
 5. **`brain_decide`** (owner): `approve` (with `fingerprint`, optional
    `itemIds`), `return` (back to the proposer, with a `comment`) or `reject`
    (closes the proposal and rejects its pending items).
+6. **Read** (reader): `brain_pages` lists approved pages by slug (`query`
+   matches slug or title, `kind`, `limit` default 50, at most 200, with the
+   `total`); `brain_page` reads one (`revision` for an older one) with its
+   history (newest first, at most 50); `brain_neighbors` returns its live
+   links one hop out and in (`types`, `limit`, `more`).
+7. **`brain_undo`** (owner): reverts one approval as a new `undo` decision.
 
 ## Review rules
 
@@ -85,6 +91,24 @@ with "being restored; retry shortly", so a decision never races the file swap.
 - **History.** Every decision is a row in `decisions` (action, items,
   fingerprint, who, comment, when). Approved pages get a new revision;
   earlier revisions stay.
+
+## Undo
+
+`brain_undo` takes a `decisionId` (an approval) and reverts it in one
+transaction, or not at all:
+
+- A page the approval updated gets a new revision copying the one before it;
+  a page it created leaves the wiki (`brain_page` no longer finds it; its
+  revisions stay, and the slug can be proposed again).
+- Links it added are removed; links it removed come back.
+- Refused (`conflict`) when a page it wrote has a later revision, a link it
+  added was removed later, a page it created now has links from later
+  decisions, or a link it removed exists again. Undo the later decision
+  first.
+- The approval gets `undone_by`, the undo row `undoes`; a decision is undone
+  once. Proposal items stay `applied`: to apply them again, propose again.
+- An undo changes page revisions, so open review fingerprints of proposals
+  touching those pages go stale.
 
 ## Warnings
 
