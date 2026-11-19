@@ -1,5 +1,5 @@
 import { isRole } from '../../authz/domain/role.js';
-import { DECISION_ACTIONS, LINK_TYPES, PACK_LIMITS, PAGE_KINDS, PROPOSALS_LIMITS, WIKI_LIMITS, WIKI_TOOLS, WikiError, type WikiActor, type WikiService } from '../../wiki/index.js';
+import { DECISION_ACTIONS, LINK_TYPES, PACK_LIMITS, PAGE_KINDS, PROPOSALS_LIMITS, READ_LIMITS, WIKI_LIMITS, WIKI_TOOLS, WikiError, type WikiActor, type WikiService } from '../../wiki/index.js';
 import { toolError, type GatewayTool, type GatewayToolContext, type GatewayToolResult } from '../domain/gateway-tool.js';
 
 /**
@@ -128,6 +128,74 @@ export function createWikiTools(wiki: WikiService): GatewayTool[] {
         annotations: { title: 'Wiki: decide', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
       },
       call: async (args, ctx) => run(ctx, (actor, brain) => wiki.decide(actor, brain, args))
+    },
+    {
+      definition: {
+        name: WIKI_TOOLS.page,
+        description: `Read one approved wiki page: its current revision (or an older one), citations, and its revision history (newest first, at most ${READ_LIMITS.maxHistory}).`,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            slug: { type: 'string' },
+            revision: { type: 'integer', minimum: 1, description: 'An older revision number (default: the current one).' }
+          },
+          required: ['slug'],
+          additionalProperties: false
+        },
+        annotations: { title: 'Wiki: page', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+      },
+      call: async (args, ctx) => run(ctx, (actor, brain) => wiki.page(actor, brain, args))
+    },
+    {
+      definition: {
+        name: WIKI_TOOLS.pages,
+        description: 'List approved wiki pages by slug, optionally only those whose slug or title contains query, or of one kind; returns how many match.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', maxLength: READ_LIMITS.maxQueryChars, description: 'Text the slug or title contains (case-insensitive).' },
+            kind: { type: 'string', enum: [...PAGE_KINDS] },
+            limit: { type: 'integer', minimum: 1, description: `Pages returned (default ${READ_LIMITS.defaultLimit}, at most ${READ_LIMITS.maxLimit}).` }
+          },
+          additionalProperties: false
+        },
+        annotations: { title: 'Wiki: pages', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+      },
+      call: async (args, ctx) => run(ctx, (actor, brain) => wiki.pages(actor, brain, args))
+    },
+    {
+      definition: {
+        name: WIKI_TOOLS.neighbors,
+        description: 'The typed links of an approved page, one hop: outgoing (direction out) then incoming (direction in), with the linked page title.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            slug: { type: 'string' },
+            types: { type: 'array', items: { type: 'string', enum: [...LINK_TYPES] }, minItems: 1, description: 'Only these link types.' },
+            limit: { type: 'integer', minimum: 1, description: `Links returned (default ${READ_LIMITS.defaultLimit}, at most ${READ_LIMITS.maxLimit}); more tells whether there are others.` }
+          },
+          required: ['slug'],
+          additionalProperties: false
+        },
+        annotations: { title: 'Wiki: neighbors', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+      },
+      call: async (args, ctx) => run(ctx, (actor, brain) => wiki.neighbors(actor, brain, args))
+    },
+    {
+      definition: {
+        name: WIKI_TOOLS.undo,
+        description:
+          'Undo one approval (brain owners), all or nothing: pages it wrote go back to their previous revision (or out of the wiki if it created them), links it added are removed and links it removed come back. ' +
+          'Refused when something it touched changed afterwards; undo the later decision first. History is kept.',
+        inputSchema: {
+          type: 'object',
+          properties: { decisionId: { type: 'integer', minimum: 1, description: 'The approval to undo (decisionId from brain_decide, or decisions in brain_review).' } },
+          required: ['decisionId'],
+          additionalProperties: false
+        },
+        annotations: { title: 'Wiki: undo a decision', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+      },
+      call: async (args, ctx) => run(ctx, (actor, brain) => wiki.undo(actor, brain, args))
     }
   ];
 }

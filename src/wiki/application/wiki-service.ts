@@ -3,10 +3,11 @@ import { atLeast, type Role } from '../../authz/domain/role.js';
 import { requiredRole } from '../../authz/domain/tool-roles.js';
 import { NOISE_TYPES } from '../../health/domain/report.js';
 import { parseProposeInput } from '../domain/proposal-input.js';
+import { READ_LIMITS, parseNeighborsInput, parsePageInput, parsePagesInput, parseUndoInput } from '../domain/read.js';
 import { fingerprintMaterial, parseDecideInput, parseProposalsInput, parseReviewInput, type DecisionAction } from '../domain/review.js';
 import { computeWarnings, type WikiWarning } from '../domain/warnings.js';
 import { WikiError, touchedSlugs, type ProposalItem, type ProposalStatus } from '../domain/wiki.js';
-import type { DecisionRecord, JournalEntry, JournalReader, PageSummary, ProposalListing, StoredItem, StoredProposal, WikiServiceDeps, WikiStore } from './ports.js';
+import type { DecisionRecord, NeighborLink, PageRevision, RevisionEntry, JournalEntry, JournalReader, PageSummary, ProposalListing, StoredItem, StoredProposal, WikiServiceDeps, WikiStore } from './ports.js';
 
 /** The tools (and use cases) of the wiki; their roles live in GATEWAY_TOOL_ROLES (src/authz). */
 export const WIKI_TOOLS = Object.freeze({
@@ -14,7 +15,11 @@ export const WIKI_TOOLS = Object.freeze({
   propose: 'brain_propose',
   proposals: 'brain_proposals',
   review: 'brain_review',
-  decide: 'brain_decide'
+  decide: 'brain_decide',
+  page: 'brain_page',
+  pages: 'brain_pages',
+  neighbors: 'brain_neighbors',
+  undo: 'brain_undo'
 });
 
 /**
@@ -76,6 +81,23 @@ export interface DecisionReceipt {
   status: ProposalStatus;
   applied: number[];
   pending: number[];
+}
+
+export interface PageRead extends PageRevision {
+  /** The page's current revision number. */
+  current: number;
+  /** Newest first, at most READ_LIMITS.maxHistory. */
+  history: RevisionEntry[];
+  historyTotal: number;
+}
+
+export interface UndoReceipt {
+  decisionId: number;
+  undone: number;
+  pagesRemoved: string[];
+  pagesRestored: string[];
+  linksRemoved: number;
+  linksRestored: number;
 }
 
 /**
@@ -242,6 +264,113 @@ export class WikiService {
       });
     } finally {
       wiki.close();
+    }
+  }
+
+  /** One approved page: a revision (default current) with its history. */
+  page(actor: WikiActor, brain: string, args: unknown): PageRead {
+    authorize(actor, WIKI_TOOLS.page);
+    const input = parsePageInput(args);
+    return this.read(brain, wiki => {
+      const current = wiki?.page(input.slug);
+      if (!wiki || !current) throw new WikiError('not_found', `no page ${input.slug}`);
+      const revision = wiki.pageRevision(input.slug, input.revision);
+      if (!revision) throw new WikiError('not_found', `no revision ${input.revision} of page ${input.slug}`);
+      const { history, total } = wiki.pageHistory(input.slug, READ_LIMITS.maxHistory);
+      return { ...revision, current: current.revision, history, historyTotal: total };
+    });
+  }
+
+  /** Approved pages by slug, optionally filtered by text (slug or title) and kind; bounded. */
+  pages(actor: WikiActor, brain: string, args: unknown): { pages: PageSummary[]; total: number } {
+    authorize(actor, WIKI_TOOLS.pages);
+    const input = parsePagesInput(args);
+    return this.read(brain, wiki => wiki?.pages(input.limit, {
+      ...(input.query !== undefined ? { query: input.query } : {}),
+      ...(input.kind !== undefined ? { kind: input.kind } : {})
+    }) ?? { pages: [], total: 0 });
+  }
+
+  /** The live links of a page, one hop, both directions; bounded. */
+  neighbors(actor: WikiActor, brain: string, args: unknown): { slug: string; links: NeighborLink[]; more: boolean } {
+    authorize(actor, WIKI_TOOLS.neighbors);
+    const input = parseNeighborsInput(args);
+    return this.read(brain, wiki => {
+      if (!wiki?.page(input.slug)) throw new WikiError('not_found', `no page ${input.slug}`);
+      return { slug: input.slug, ...wiki.neighbors(input.slug, input.types, input.limit) };
+    });
+  }
+
+  /**
+   * Reverts one approval, all or nothing, as a new decision: each page it
+   * wrote goes back to its previous revision (copied as a new revision) or out
+   * of the wiki if the approval created it; links it added are removed and
+   * links it removed come back. Refused when anything it touched changed
+   * after it (undo the later decision first), or when a removed page would
+   * leave links behind. Revisions and decisions stay as history.
+   */
+  undo(actor: WikiActor, brain: string, args: unknown): UndoReceipt {
+    authorize(actor, WIKI_TOOLS.undo);
+    const input = parseUndoInput(args);
+    const wiki = this.deps.openWiki(this.dataDir(brain), { create: false });
+    if (!wiki) throw new WikiError('not_found', `no decision ${input.decisionId}`);
+    try {
+      return wiki.transaction(() => {
+        const decision = wiki.decision(input.decisionId);
+        if (!decision) throw new WikiError('not_found', `no decision ${input.decisionId}`);
+        if (decision.action !== 'approve') throw new WikiError('conflict', `decision ${decision.id} is a ${decision.action}; only an approval can be undone`);
+        if (decision.undoneBy !== null) throw new WikiError('conflict', `decision ${decision.id} was already undone by decision ${decision.undoneBy}`);
+        const effects = wiki.decisionEffects(decision.id);
+        for (const revision of effects.revisions) {
+          if (revision.currentRevisionId !== revision.revisionId) throw new WikiError('conflict', `page ${revision.slug} changed after decision ${decision.id}; undo the later decision first`);
+        }
+        for (const added of effects.linksAdded) {
+          if (added.removedBy !== null) throw new WikiError('conflict', `link ${added.from} ${added.type} ${added.to} was removed after decision ${decision.id}; undo the later decision first`);
+        }
+        const atMs = this.deps.nowMs();
+        const undoId = wiki.insertDecision({
+          proposalId: decision.proposalId, proposalRevision: decision.proposalRevision, action: 'undo', itemIds: decision.itemIds,
+          fingerprint: null, decidedBy: actor.login ?? null, comment: null, atMs, undoes: decision.id
+        });
+        wiki.markUndone(decision.id, undoId);
+        for (const added of effects.linksAdded) wiki.removeLink(added.id, undoId);
+        const by = { decisionId: undoId, createdBy: actor.login ?? null, atMs };
+        const pagesRemoved: string[] = [];
+        const pagesRestored: string[] = [];
+        for (const revision of effects.revisions) {
+          if (revision.previousRevisionId === null) {
+            if (wiki.liveLinksTouching(revision.pageId, decision.id).length > 0) {
+              throw new WikiError('conflict', `page ${revision.slug} still has links from later decisions; undo or unlink them first`);
+            }
+            wiki.clearCurrentRevision(revision.pageId);
+            pagesRemoved.push(revision.slug);
+          } else {
+            wiki.copyRevision(revision.pageId, revision.previousRevisionId, by);
+            pagesRestored.push(revision.slug);
+          }
+        }
+        for (const removed of effects.linksRemoved) {
+          const item = { op: 'link' as const, from: removed.from, to: removed.to, type: removed.type, citations: [] };
+          if (wiki.livePageId(removed.from) === undefined || wiki.livePageId(removed.to) === undefined) {
+            throw new WikiError('conflict', `link ${removed.from} ${removed.type} ${removed.to} cannot come back: one of its pages is no longer in the wiki`);
+          }
+          if (wiki.liveLinkId(item) !== undefined) throw new WikiError('conflict', `link ${removed.from} ${removed.type} ${removed.to} exists again since decision ${decision.id}`);
+          wiki.restoreLink(removed.id, undoId);
+        }
+        return { decisionId: undoId, undone: decision.id, pagesRemoved, pagesRestored, linksRemoved: effects.linksAdded.length, linksRestored: effects.linksRemoved.length };
+      });
+    } finally {
+      wiki.close();
+    }
+  }
+
+  /** Runs a read on the brain's wiki (undefined when it has none yet, and no file is made). */
+  private read<T>(brain: string, work: (wiki: WikiStore | undefined) => T): T {
+    const wiki = this.deps.openWiki(this.dataDir(brain), { create: false });
+    try {
+      return work(wiki);
+    } finally {
+      wiki?.close();
     }
   }
 

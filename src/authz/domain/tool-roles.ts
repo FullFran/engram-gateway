@@ -53,7 +53,8 @@ export const TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(Object.a
  * - brain_health: owner (instance admins own every brain).
  * - brain_resolve: reader (maps a git remote to a brain the caller can already use).
  * - wiki (#16): proposing and reading proposals is writer (brain_compile_pack
- *   reads the journal to propose); deciding is owner (no separate curator role).
+ *   reads the journal to propose); deciding and undoing is owner (no separate
+ *   curator role); reading approved pages is reader.
  */
 export const GATEWAY_TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(Object.assign(Object.create(null) as Record<string, Role>, {
   brain_health: 'owner',
@@ -62,7 +63,11 @@ export const GATEWAY_TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(
   brain_propose: 'writer',
   brain_proposals: 'writer',
   brain_review: 'writer',
-  brain_decide: 'owner'
+  brain_decide: 'owner',
+  brain_page: 'reader',
+  brain_pages: 'reader',
+  brain_neighbors: 'reader',
+  brain_undo: 'owner'
 } satisfies Record<string, Role>));
 
 /**
