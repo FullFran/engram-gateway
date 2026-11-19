@@ -12,6 +12,8 @@
  * This module knows nothing about the MCP SDK, the HTTP layer or auth.
  * Defaults: redaction (#9) on, memory text wrapped as data (#19).
  */
+import { ToolCallDeniedError, createAuthorizeStage, filterToolList } from './authorize.js';
+import type { ToolAccessCheck, ToolListContext } from './authorize.js';
 import { createRedactStage } from './redact.js';
 import { createWrapStage } from './wrap-data.js';
 
@@ -30,6 +32,10 @@ export interface ToolCallResult {
 
 export interface ToolCallContext {
   request: ToolCallRequest;
+  /** Who made the call (from the validated token); absent when auth is off. */
+  caller?: ToolCaller;
+  /** The brain (slug) the call was routed to; null when not tied to a brain. */
+  brain: string | null;
   /** Facts for later stages, e.g. `redactions: { github: 1 }`. Never secret values. */
   meta: Record<string, unknown>;
 }
@@ -48,8 +54,14 @@ export interface ToolCallInfo {
   startedAtMs: number;
 }
 
-/** How the forward ended: a result (which may be a tool error) or a thrown error. */
-export type ToolCallOutcome = { ok: true; result: ToolCallResult } | { ok: false; error: unknown };
+/**
+ * How the call ended: a result (which may be a tool error), a thrown error,
+ * or a refusal by the authorize stage (never forwarded).
+ */
+export type ToolCallOutcome =
+  | { ok: true; result: ToolCallResult }
+  | { ok: false; error: unknown }
+  | { ok: false; denied: ToolCallDeniedError };
 
 export type RequestStage = (ctx: ToolCallContext) => ToolCallContext | Promise<ToolCallContext>;
 export type ResultStage = (ctx: ToolCallContext, result: ToolCallResult) => ToolCallResult | Promise<ToolCallResult>;
@@ -57,32 +69,49 @@ export type ResultStage = (ctx: ToolCallContext, result: ToolCallResult) => Tool
 export type AuditStage = (ctx: ToolCallContext, outcome: ToolCallOutcome, call: ToolCallInfo) => void | Promise<void>;
 export type Forward = (request: ToolCallRequest) => Promise<ToolCallResult>;
 
+/** Narrows a `tools/list` result to what the caller may call; same access check as `authorize`. */
+export type ToolListStage = <T extends { name: string }>(ctx: ToolListContext, tools: readonly T[]) => T[];
+
 export interface ToolCallPipeline {
   authorize: RequestStage;
   redact: RequestStage;
   audit: AuditStage;
   wrap: ResultStage;
+  listTools: ToolListStage;
 }
 
 export interface ToolCallPipelineOptions extends Partial<ToolCallPipeline> {
+  /**
+   * Per-brain access (#6): sets both `authorize` and `listTools` from one
+   * check, so the list never shows a tool the call would refuse. Default:
+   * everything is allowed (authentication off).
+   */
+  access?: ToolAccessCheck;
   /** Secret redaction of write-tool arguments (#9). Default on. */
   redactSecrets?: boolean;
 }
 
-/** Placeholder until #6 adds roles and grants: every call is allowed. */
+/** Every call is allowed: the default when authentication is off (loopback). */
 export const allowAll: RequestStage = ctx => ctx;
 /** No audit log (tests, or a gateway without a database). */
 export const noAudit: AuditStage = () => {};
+/** Every tool is listed. */
+export const listAll: ToolListStage = (_ctx, tools) => [...tools];
 /** Identity result stage (e.g. to turn wrapping off in tests). */
 export const passResult: ResultStage = (_ctx, result) => result;
 
 export function createToolCallPipeline(opts: ToolCallPipelineOptions = {}): ToolCallPipeline {
   return {
-    authorize: opts.authorize ?? allowAll,
+    authorize: opts.authorize ?? (opts.access ? createAuthorizeStage(opts.access) : allowAll),
     redact: opts.redact ?? createRedactStage({ enabled: opts.redactSecrets ?? true }),
     audit: opts.audit ?? noAudit,
-    wrap: opts.wrap ?? createWrapStage()
+    wrap: opts.wrap ?? createWrapStage(),
+    listTools: opts.listTools ?? (opts.access ? withAccess(opts.access) : listAll)
   };
+}
+
+function withAccess(access: ToolAccessCheck): ToolListStage {
+  return (ctx, tools) => filterToolList(access, ctx, tools);
 }
 
 export interface RunToolCallOptions {
@@ -94,18 +123,25 @@ export interface RunToolCallOptions {
 
 /**
  * Runs one call through the stages in the fixed order. Audit runs for every
- * call that reaches the forward step, also when the forward throws; then the
- * original error is rethrown.
+ * call: refused by authorize (then `ToolCallDeniedError` is rethrown and
+ * nothing is forwarded), forwarded, or failed in the forward step (then the
+ * original error is rethrown).
  */
 export async function runToolCall(pipeline: ToolCallPipeline, request: ToolCallRequest, forward: Forward, opts: RunToolCallOptions = {}): Promise<ToolCallResult> {
-  let ctx: ToolCallContext = { request, meta: {} };
-  ctx = await pipeline.authorize(ctx);
-  ctx = await pipeline.redact(ctx);
+  const brain = opts.brain ?? null;
+  let ctx: ToolCallContext = { request, ...(opts.caller ? { caller: opts.caller } : {}), brain, meta: {} };
   const call: ToolCallInfo = {
     ...(opts.caller ? { caller: opts.caller } : {}),
-    brain: opts.brain ?? null,
+    brain,
     startedAtMs: (opts.nowMs ?? Date.now)()
   };
+  try {
+    ctx = await pipeline.authorize(ctx);
+  } catch (error) {
+    if (error instanceof ToolCallDeniedError) await pipeline.audit(ctx, { ok: false, denied: error }, call);
+    throw error;
+  }
+  ctx = await pipeline.redact(ctx);
   let result: ToolCallResult;
   try {
     result = await forward(ctx.request);

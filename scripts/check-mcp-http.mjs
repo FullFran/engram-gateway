@@ -13,9 +13,14 @@
 //   - brains: `/mcp/<brain>` isolation (one engram child and data dir each),
 //     lazy spawn and idle reaping seen on /health/brains, per-brain OAuth
 //     audiences, unknown brains answering 404 before authentication
+//   - roles (#6): a reader's tools/list holds reader tools only, its mem_save
+//     is an MCP error that writes nothing (audited as denied), no token for a
+//     brain without a grant, and a revoked grant answers 403 on the next request
 // Scratch state lives outside the repository and is removed on success.
 
 import { execFileSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
+import { TOOL_ROLES } from '../dist/authz/index.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -240,6 +245,94 @@ async function checkBrainAudiences(github) {
   }
 }
 
+async function checkRoles(github) {
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const dataDir = join(scratch, `data-${port}`);
+  const gateway = await startGateway(scratch, {
+    PORT: String(port), BRAINS_ROOT: join(scratch, `brains-${port}`), BRAINS: 'alpha,beta',
+    ...githubEnv(port, github.url, dataDir, { BRAIN_GRANTS: 'reader-r:alpha:reader,reader-r:beta:reader,writer-w:alpha:writer' })
+  });
+  const bearer = token => ({ authorization: `Bearer ${token}` });
+  const names = list => list.result.result.tools.map(tool => tool.name).sort();
+  // mem_stats as plain text: the data-wrapping nonce (#19) differs on every call.
+  const stats = async token => toolText((await mcpCall(base, '/mcp/alpha', 'mem_stats', {}, bearer(token))).result).replace(/nonce="[0-9a-f]+"/g, 'nonce');
+  const rolesOf = role => Object.keys(TOOL_ROLES).filter(name => TOOL_ROLES[name] === role).sort();
+  try {
+    // --- tokens: only for brains the user holds a grant on ---
+    const reader = await githubLogin(base, github, 'reader-r');
+    assert(reader.jar, `a user with a grant signs in: ${reader.poll.text.slice(0, 200)}`);
+    const readerAlpha = await obtainToken(base, reader.jar, `${base}/mcp/alpha`);
+    for (const resource of [`${base}/mcp/default`, undefined]) {
+      const refused = await obtainToken(base, reader.jar, resource);
+      assertEqual(refused.page.status, 403, `no token without a grant (${resource ?? '/mcp'})`);
+    }
+    const readerBeta = await obtainToken(base, reader.jar, `${base}/mcp/beta`);
+    const stranger = await githubLogin(base, github, 'stranger-s');
+    assertEqual(stranger.jar, null, 'a login with no grant and not an admin cannot sign in');
+    ok('a token is only issued for a brain the user holds a grant on');
+
+    // --- tools/list shows exactly the reader tools; the admin sees every tool ---
+    const admin = await githubLogin(base, github, 'FullFran');
+    const adminAlpha = await obtainToken(base, admin.jar, `${base}/mcp/alpha`);
+    const readerList = await mcpToolsList(base, '/mcp/alpha', bearer(readerAlpha.accessToken));
+    assertEqual(readerList.status, 200, 'reader tools/list');
+    assertEqual(JSON.stringify(names(readerList)), JSON.stringify(rolesOf('reader')), 'reader sees exactly the reader tools');
+    assertEqual(names(await mcpToolsList(base, '/mcp/alpha', bearer(adminAlpha.accessToken))).length, Object.keys(TOOL_ROLES).length, 'the admin (owner) sees every tool');
+    ok('tools/list holds exactly the tools the role allows');
+
+    // --- a reader calling mem_save: MCP error, nothing written, audited as denied ---
+    const marker = `reader-write-${Date.now()}`;
+    const statsBefore = await stats(adminAlpha.accessToken);
+    assert(/Observations: \d+/.test(statsBefore), `mem_stats answers: ${statsBefore.slice(0, 200)}`);
+    const denied = await mcpCall(base, '/mcp/alpha', 'mem_save', { title: marker, content: `reader wrote ${marker}`, type: 'discovery' }, bearer(readerAlpha.accessToken));
+    assertEqual(denied.status, 200, 'the JSON-RPC answer arrives');
+    assertEqual(denied.result?.error?.code, -32602, `mem_save by a reader is an MCP error: ${denied.text.slice(0, 200)}`);
+    assert(denied.result.result === undefined, 'no tool result');
+    const statsAfter = await stats(adminAlpha.accessToken);
+    assertEqual(statsAfter, statsBefore, 'engram memory stats unchanged');
+    const search = toolText((await mcpCall(base, '/mcp/alpha', 'mem_search', { query: marker }, bearer(adminAlpha.accessToken))).result);
+    assert(/No memories found/.test(search) && !search.includes('reader wrote'), `nothing was saved: ${search.slice(0, 200)}`);
+    const gatewayDb = new DatabaseSync(join(dataDir, 'gateway.db'), { readOnly: true });
+    const audited = gatewayDb.prepare("SELECT a.outcome FROM audit_log a JOIN users u ON u.id = CAST(a.actor_id AS INTEGER) WHERE u.github_login = 'reader-r' AND a.target = 'mem_save'").all();
+    gatewayDb.close();
+    assertEqual(JSON.stringify(audited.map(row => row.outcome)), '["denied"]', 'the refused call is in the audit log as denied');
+    ok('a reader calling mem_save gets an MCP error, engram is unchanged, the audit log says denied');
+
+    // --- writer: may save, may not delete ---
+    const writer = await githubLogin(base, github, 'writer-w');
+    const writerAlpha = await obtainToken(base, writer.jar, `${base}/mcp/alpha`);
+    const saved = await mcpCall(base, '/mcp/alpha', 'mem_save', { title: `${marker}-w`, content: `writer wrote ${marker}`, type: 'discovery' }, bearer(writerAlpha.accessToken));
+    assert(saved.result?.result && !saved.result.result.isError, `a writer saves: ${saved.text.slice(0, 200)}`);
+    const removed = await mcpCall(base, '/mcp/alpha', 'mem_delete', { id: 1 }, bearer(writerAlpha.accessToken));
+    assertEqual(removed.result?.error?.code, -32602, 'mem_delete needs owner');
+    ok('a writer saves but cannot delete');
+
+    // --- revocation applies to the next request: 403, and the refresh token stops working ---
+    const revoke = where => {
+      const writable = new DatabaseSync(join(dataDir, 'gateway.db'));
+      writable.exec('PRAGMA busy_timeout = 5000');
+      writable.prepare(`DELETE FROM grants WHERE user_id = (SELECT id FROM users WHERE github_login = 'reader-r') ${where}`).run();
+      writable.close();
+    };
+    revoke("AND brain_id = (SELECT id FROM brains WHERE slug = 'alpha')");
+    const afterRevoke = await mcpToolsList(base, '/mcp/alpha', bearer(readerAlpha.accessToken));
+    assertEqual(afterRevoke.status, 403, 'a revoked grant answers 403 on the next request');
+    assertEqual(afterRevoke.body?.error, 'forbidden', '403 body');
+    assertEqual((await mcpToolsList(base, '/mcp/beta', bearer(readerBeta.accessToken))).status, 200, 'the grant on beta still works');
+    assertEqual((await mcpToolsList(base, '/mcp/alpha', bearer(adminAlpha.accessToken))).status, 200, 'other users keep their access');
+    const refresh = await request(base, { method: 'POST', path: '/oauth/token', form: { grant_type: 'refresh_token', refresh_token: readerAlpha.refreshToken, client_id: readerAlpha.clientId } });
+    assertEqual(refresh.status, 400, `no refreshed token without the grant (${refresh.text.slice(0, 200)})`);
+    // Without any grant left the account is no longer allowed at all, as when a
+    // login leaves ALLOWED_GITHUB_LOGINS: its tokens stop being valid (401).
+    revoke('');
+    assertEqual((await mcpToolsList(base, '/mcp/beta', bearer(readerBeta.accessToken))).status, 401, 'no grant left: the token is no longer valid');
+    ok('revoking a grant answers 403 on the very next request, and the refresh token is refused');
+  } finally {
+    await gateway.stop();
+  }
+}
+
 const github = await startFakeGitHub();
 try {
   console.log(`MCP HTTP checks (scratch: ${scratch})`);
@@ -248,6 +341,7 @@ try {
   await checkBrains();
   await checkInvalidBrainConfig();
   await checkBrainAudiences(github);
+  await checkRoles(github);
   console.log(`MCP HTTP check passed: ${passed} groups.`);
 } catch (error) {
   console.error(`MCP HTTP check failed after ${passed} passing groups: ${error.stack || error.message}`);

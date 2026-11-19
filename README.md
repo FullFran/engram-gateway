@@ -27,8 +27,10 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
   the legacy `initialize` handshake are served.
 - **Tool-call pipeline.** Every `tools/call` runs through the same stages,
   in order: authorize → redact → forward to Engram → audit → wrap result.
-  Authorize is a pass-through placeholder for now (roles and grants); audit
-  writes one row per call to the audit log (see [Audit log](#audit-log)).
+  Authorize checks the caller's role on the brain (see
+  [Roles and grants](#roles-and-grants)); a refused call is never forwarded.
+  Audit writes one row per call, refused ones included, to the audit log
+  (see [Audit log](#audit-log)).
 - **Secret redaction.** Before a tool call is forwarded, every string
   argument (values and object keys) is scanned for well-known secret shapes
   and each match becomes `[secret removed:<kind>]`: Anthropic, OpenAI,
@@ -60,8 +62,9 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
 - **Auth.** A built-in OAuth 2.1 authorization server: protected resource
   metadata (RFC 9728), dynamic client registration, client ID metadata
   documents, PKCE, rotating refresh tokens. People sign in with GitHub's
-  device flow, so only the OAuth App's public client ID is needed. Only the
-  logins in `ALLOWED_GITHUB_LOGINS` get a token. The token scope is `memory`.
+  device flow, so only the OAuth App's public client ID is needed. A token
+  is issued only for a brain the login holds a grant on (see
+  [Roles and grants](#roles-and-grants)). The token scope is `memory`.
 - **Engram.** The Docker image ships one pinned Engram release
   (`engram.version`), verified against the release's `checksums.txt`. A
   scheduled workflow opens a PR when Engram publishes a new release, after
@@ -79,7 +82,8 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
    | --- | --- | --- |
    | `PUBLIC_BASE_URL` | yes | Public HTTPS origin, e.g. `https://memory.example.com` |
    | `GITHUB_CLIENT_ID` | yes | The OAuth App's client ID |
-   | `ALLOWED_GITHUB_LOGINS` | yes | Comma-separated GitHub logins allowed in |
+   | `ALLOWED_GITHUB_LOGINS` | yes | Comma-separated GitHub logins of the instance admins (owners of every brain) |
+   | `BRAIN_GRANTS` | no | Everyone else's roles as `login:brain:role`, e.g. `alice:work:reader,bob:default:writer` (see [Roles and grants](#roles-and-grants)) |
    | `GITHUB_APP_NAME` | no | Name shown on the sign-in page |
    | `ENGRAM_PROJECT` | no | Default Engram project for this memory |
    | `BRAINS` | no | Extra brains to create, e.g. `work,notes` (see [Brains](#brains)) |
@@ -165,9 +169,8 @@ A brain is one data directory with its own `engram.db`, served by its own
   without a token and serves protected-resource metadata, an unknown one
   answers `404` to both. This is accepted (slugs are low-sensitivity); do not
   put secrets in brain names. No endpoint lists the brains.
-- **Access.** Until per-brain grants land (#6), every login in
-  `ALLOWED_GITHUB_LOGINS` is trusted on every brain: any of them can obtain a
-  token for any brain.
+- **Access.** Only users with a grant on a brain can open it; see
+  [Roles and grants](#roles-and-grants).
 
 ### Upgrading to brains
 
@@ -189,13 +192,64 @@ values). Every brain listed in `ENGRAM_CLOUD_BRAINS` gets the same
 `ENGRAM_CLOUD_*` values, so opted-in brains share one set of cloud
 credentials.
 
-Until per-brain grants land (#6), every allowed GitHub login can use every
-brain.
+Access needs no change either: every login in `ALLOWED_GITHUB_LOGINS`
+becomes an instance admin and `owner` of every brain, `default` included.
+Give anyone else a role with `BRAIN_GRANTS`.
+
+### Roles and grants
+
+Each user holds at most one role per brain, stored in the `grants` table of
+the gateway database:
+
+| Role | May call |
+| --- | --- |
+| `reader` | Read tools: `mem_search`, `mem_context`, `mem_get_observation`, `mem_timeline`, `mem_stats`, ... |
+| `writer` | Reader tools plus saves, updates, sessions, judgments, pins and reviews (`mem_save`, `mem_update`, `mem_session_*`, ...) |
+| `owner` | Writer tools plus destructive or brain-wide ones: `mem_delete`, `mem_merge_projects`, `mem_consolidate`, `mem_doctor` |
+
+The full table is `src/authz/domain/tool-roles.ts`. It is deny by default:
+a tool missing from it is refused for every role, and the e2e suite fails
+when the pinned Engram serves a tool the table does not list, so a new
+Engram release cannot add an unreviewed tool.
+
+- **Enforcement.** `tools/list` shows only the tools the caller's role
+  allows; `tools/call` refuses any other tool with a JSON-RPC error
+  (`-32602`) even when the client calls it directly. A refused call never
+  reaches Engram and is recorded in the audit log with outcome `denied`.
+- **No grant on a brain.** No token is issued for that brain (the consent
+  page answers 403), and a request on `/mcp/<brain>` with a token whose
+  grant has been revoked answers `403 {"error":"forbidden"}`. A login that
+  holds no grant on any brain (and is not an admin) cannot sign in, and its
+  existing tokens stop working (401), exactly as when a login is removed
+  from `ALLOWED_GITHUB_LOGINS`.
+- **No cache.** The grant is read from the gateway database on every request
+  and every tool call, so a revocation applies to the next request. A
+  refresh token for a brain without a grant is refused.
+- **Instance admins** are a flag on the user (`users.is_admin`), not a brain
+  role. Every login in `ALLOWED_GITHUB_LOGINS` is an admin and `owner` of
+  every brain.
+- **Where grants come from.** Until the grant management API (#10), the
+  configuration is the only source: on every start the gateway makes the
+  `grants` table and the admin flag match `ALLOWED_GITHUB_LOGINS` and
+  `BRAIN_GRANTS` exactly. A login removed from either loses that access on
+  the next start; `users` rows are kept (the audit log points at them).
+  `BRAIN_GRANTS` naming an unknown brain, a role other than `reader`,
+  `writer` or `owner`, or an admin fails startup.
+- **Revoking without a restart.** Delete the row from `grants` in
+  `gateway.db` (it applies to the next request), then remove the entry from
+  `BRAIN_GRANTS` as well, or the next start grants it again.
+- **Auth off.** On a loopback bind without authentication there is no
+  caller, so roles do not apply: every tool is allowed (and `BRAIN_GRANTS`
+  is ignored with a warning).
+- **Clients (#27).** The role decision is a pure function of the user's
+  grant and the client connection's role on the brain
+  (`src/authz/domain/decision.ts`); the effective role is the weaker of the
+  two. Connections are not modelled yet, so a client has its user's role.
 
 ### Gateway database
 
 Gateway state (OAuth clients, token families, hashed tokens and codes, the
-brains table, plus the users and grants tables later features fill) is one SQLite file
+brains table, users and their grants, the audit log) is one SQLite file
 opened with Node's built-in `node:sqlite` (Node 22.13 or later; the image
 ships Node 24), in WAL mode with foreign keys on and a 5 s busy timeout, so
 two gateways can share it during a deploy. The schema is versioned with
@@ -237,8 +291,9 @@ id, and a fixed `errorKind` such as `forward_failed`).
   A crash between the forward and that write loses the row; this is accepted
   rather than a two-phase write. Admin mutations write their row in the same
   transaction (`insertAuditEvent`).
-- **Every call, including failures.** The audit stage runs after the
-  forward for every call that reaches it: `ok`, `error` with `errorKind`
+- **Every call, including failures.** A call the authorize stage refuses is
+  recorded as `denied` and never forwarded. Otherwise the audit stage runs
+  after the forward: `ok`, `error` with `errorKind`
   `tool_error` (the tool answered `isError`) or `forward_failed` (the forward
   threw; the original error still reaches the client). The caller is the
   signed-in GitHub login and OAuth client id from the access token.
@@ -252,7 +307,7 @@ id, and a fixed `errorKind` such as `forward_failed`).
   the log oldest first (read in pages, never all at once) as RFC 4180 CSV.
   Cells that start with `=`, `+`, `-`, `@`, tab or CR get a `'` prefix so a
   spreadsheet does not run them as formulas. The admin-only HTTP endpoint
-  comes with roles.
+  comes with the admin API.
 
 ## Develop
 

@@ -1,9 +1,9 @@
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { Server } from '@modelcontextprotocol/server';
+import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/server';
 import type { McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
-import { createToolCallPipeline, runToolCall } from '../pipeline/index.js';
+import { ToolCallDeniedError, createToolCallPipeline, runToolCall } from '../pipeline/index.js';
 import type { ToolCaller, ToolCallPipeline, ToolCallResult } from '../pipeline/index.js';
 
 export interface EngramBridgeOptions {
@@ -21,7 +21,8 @@ export interface EngramBridgeOptions {
   logger: Logger;
   /**
    * Stages every `tools/call` runs through (authorize -> redact -> forward ->
-   * audit -> wrap). Defaults to `createToolCallPipeline()`: secret redaction on.
+   * audit -> wrap); `tools/list` is narrowed by its `listTools` stage.
+   * Defaults to `createToolCallPipeline()`: secret redaction on, every tool allowed.
    */
   pipeline?: ToolCallPipeline;
   /** The brain this child serves (its slug), for logs and the per-call context. */
@@ -139,13 +140,23 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
       { name: GATEWAY_NAME, version },
       { capabilities: { tools: {} }, ...(instructions !== undefined ? { instructions } : {}) }
     );
-    server.setRequestHandler('tools/list', async request => (await upstream()).listTools(request.params));
+    const brain = opts.brain ?? null;
+    server.setRequestHandler('tools/list', async request => {
+      const listed = await (await upstream()).listTools(request.params);
+      return { ...listed, tools: pipeline.listTools({ ...(caller ? { caller } : {}), brain }, listed.tools) };
+    });
     server.setRequestHandler('tools/call', async request => {
       const { name, arguments: args } = request.params;
-      const result = await runToolCall(pipeline, { name, ...(args !== undefined ? { arguments: args } : {}) }, async call =>
-        (await (await upstream()).callTool(call)) as ToolCallResult,
-      { ...(caller ? { caller } : {}), ...(opts.brain !== undefined ? { brain: opts.brain } : {}) });
-      return result as Awaited<ReturnType<Client['callTool']>>;
+      try {
+        const result = await runToolCall(pipeline, { name, ...(args !== undefined ? { arguments: args } : {}) }, async call =>
+          (await (await upstream()).callTool(call)) as ToolCallResult,
+        { ...(caller ? { caller } : {}), brain });
+        return result as Awaited<ReturnType<Client['callTool']>>;
+      } catch (error) {
+        // A refused call is a protocol error, like an unknown tool: the client gets no tool result.
+        if (error instanceof ToolCallDeniedError) throw new ProtocolError(ProtocolErrorCode.InvalidParams, error.message);
+        throw error;
+      }
     });
     return server;
   };

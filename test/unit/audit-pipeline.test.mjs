@@ -155,7 +155,8 @@ test('over HTTP, a call on /mcp/<slug> is audited with that brain and the authen
   const authenticator = { prepare: async () => {}, authenticate: () => ({ ok: true, principal }) };
   const app = createGatewayApp({
     bindHost: '127.0.0.1', trustProxy: false, logger, brains: registry,
-    auth: { router: express.Router(), authenticator, resource: 'http://127.0.0.1/mcp' }
+    auth: { router: express.Router(), authenticator, resource: 'http://127.0.0.1/mcp' },
+    brainAccess: { mayOpen: () => true }
   });
   const server = createServer(app);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

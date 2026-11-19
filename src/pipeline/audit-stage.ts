@@ -1,6 +1,6 @@
 /**
- * The audit stage (#8): one record per call that reached the forward step,
- * with the outcome, the caller, the brain and the pipeline facts in `meta`
+ * The audit stage (#8): one record per call, refused by the authorize stage
+ * (`denied`, #6) or forwarded, with the outcome, the caller, the brain and the pipeline facts in `meta`
  * (redaction counts). It passes no argument values and no error messages;
  * the recorder keeps counts and ids only.
  *
@@ -16,7 +16,7 @@ export interface AuditedToolCall {
   brain: string | null;
   tool: string;
   startedAtMs: number;
-  outcome: 'ok' | 'error';
+  outcome: 'ok' | 'error' | 'denied';
   /** `forward_failed` when the forward threw, `tool_error` for an `isError` result. */
   errorKind?: 'forward_failed' | 'tool_error';
   meta: Record<string, unknown>;
@@ -35,15 +35,16 @@ export interface AuditStageOptions {
 export function createAuditStage(opts: AuditStageOptions): AuditStage {
   return async (ctx, outcome, call) => {
     const tool = ctx.request.name;
+    const denied = !outcome.ok && 'denied' in outcome;
     const failed = !outcome.ok || outcome.result.isError === true;
-    const errorKind = !outcome.ok ? 'forward_failed' : outcome.result.isError === true ? 'tool_error' : undefined;
+    const errorKind = denied ? undefined : !outcome.ok ? 'forward_failed' : outcome.result.isError === true ? 'tool_error' : undefined;
     try {
       await opts.record({
         ...(call.caller ? { caller: call.caller } : {}),
         brain: call.brain,
         tool,
         startedAtMs: call.startedAtMs,
-        outcome: failed ? 'error' : 'ok',
+        outcome: denied ? 'denied' : failed ? 'error' : 'ok',
         ...(errorKind ? { errorKind } : {}),
         meta: ctx.meta
       });

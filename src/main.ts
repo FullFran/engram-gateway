@@ -1,7 +1,9 @@
 /**
  * Composition root: reads configuration, opens the gateway database, makes
  * the `brains` table match the startup settings, wires the auth module and
- * one Engram bridge per brain into the HTTP app and listens. Shutdown stops
+ * one Engram bridge per brain into the HTTP app and listens. With auth on,
+ * users and grants are synced from ALLOWED_GITHUB_LOGINS and BRAIN_GRANTS
+ * (src/authz) and checked on every request and tool call. Shutdown stops
  * accepting connections, stops every `engram mcp` child, then closes the
  * database.
  *
@@ -13,6 +15,7 @@ import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
+import { GrantAccessPolicy, SqliteGrantRepository, bootstrapAccess, createToolAccess, parseAdminLogins, parseBrainGrants } from './authz/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createEngramBridge } from './bridge/index.js';
 import { resolveGatewayConfig } from './config.js';
@@ -44,6 +47,7 @@ function gatewayDbPath(env: NodeJS.ProcessEnv): string {
 async function main(): Promise<void> {
   const config = resolveGatewayConfig(process.env);
   const brainsConfig = resolveBrainsConfig(process.env);
+  const brainGrants = parseBrainGrants(process.env.BRAIN_GRANTS);
   const cloudWarning = cloudSyncWarning(process.env, brainsConfig);
   if (cloudWarning) logger.warn(cloudWarning);
 
@@ -62,13 +66,25 @@ async function main(): Promise<void> {
   } else if (authConfig.insecure) {
     logger.warn(`Authentication is OFF on non-loopback HOST=${config.host} (ALLOW_INSECURE_NO_AUTH=true): anyone who can reach this address can read and change the Engram memory.`);
   }
-  const auth = authConfig.mode === 'oauth' ? buildAuth(authConfig, { logger, db }) : undefined;
+  // Access (#6): with auth on, ALLOWED_GITHUB_LOGINS are the instance admins
+  // (owners of every brain) and BRAIN_GRANTS everyone else's roles; both are
+  // written to the gateway database at start and read on every request.
+  const grants = new SqliteGrantRepository(db);
+  if (authConfig.mode === 'oauth') {
+    bootstrapAccess(grants, { admins: parseAdminLogins(process.env.ALLOWED_GITHUB_LOGINS), grants: brainGrants, brains: brains.map(brain => brain.slug) });
+  } else if (brainGrants.length > 0) {
+    logger.warn('BRAIN_GRANTS is ignored: authentication is off, so every caller may use every tool on every brain');
+  }
+  const auth = authConfig.mode === 'oauth'
+    ? buildAuth(authConfig, { logger, db, policy: new GrantAccessPolicy(grants, authConfig.settings.resources) })
+    : undefined;
   await auth?.warmUp();
 
   // Audit log (#8): every tool call gets one row in the gateway database,
   // with the brain it was routed to; without auth the actor is `anonymous`.
   const auditLog = new SqliteAuditLog(db);
   const pipeline = createToolCallPipeline({
+    ...(auth ? { access: createToolAccess(grants) } : {}),
     audit: createAuditStage({
       record: toolCallRecorder(auditLog, { nowMs: () => Date.now() }),
       onError: (error, tool) => logger.error('Audit log write failed; the tool call went through unrecorded', { tool, reason: (error as Error).message })
@@ -102,7 +118,10 @@ async function main(): Promise<void> {
     bindHost: config.host,
     ...(config.publicBaseUrl ? { publicBaseUrl: config.publicBaseUrl } : {}),
     trustProxy: config.trustProxy,
-    ...(auth ? { auth: { router: auth.router, authenticator: auth.authenticator, resource: auth.settings.resources[0]! } } : {}),
+    ...(auth ? {
+      auth: { router: auth.router, authenticator: auth.authenticator, resource: auth.settings.resources[0]! },
+      brainAccess: { mayOpen: (login: string, brain: string) => grants.roleOf(login, brain) !== undefined }
+    } : {}),
     brains: registry,
     logger
   });

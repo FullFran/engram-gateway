@@ -22,12 +22,23 @@ export interface GatewayAuth {
   resource: string;
 }
 
+/** Per-brain access for the MCP endpoint (#6): read on every request, never cached. */
+export interface BrainAccess {
+  /** Does `login` hold any role on brain `brain`? */
+  mayOpen(login: string, brain: string): boolean;
+}
+
 export interface GatewayAppOptions {
   bindHost: string;
   publicBaseUrl?: string;
   trustProxy: boolean | number | string;
   /** Undefined: authentication is off (loopback bind only, see `resolveAuthConfig`). */
   auth?: GatewayAuth;
+  /**
+   * With auth on, a signed-in caller without a grant on the brain gets 403
+   * before any MCP processing. Required when `auth` is set.
+   */
+  brainAccess?: BrainAccess;
   /** The brains served at `/mcp/<slug>` (`/mcp`: the default brain), with live/idle counts for `/health/brains`. */
   brains: McpBrains & { stats(): { live: number; idle: number } };
   logger: Logger;
@@ -47,6 +58,7 @@ function credentialHeaders(req: IncomingMessage) {
  */
 export function createGatewayApp(options: GatewayAppOptions): express.Express {
   const { auth, logger } = options;
+  if (auth && !options.brainAccess) throw new Error('createGatewayApp: brainAccess is required when auth is on');
   const app = express();
   app.disable('x-powered-by');
   // Off unless TRUST_PROXY says otherwise: X-Forwarded-* is only honoured
@@ -90,6 +102,12 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
       return;
     }
     const principal = result.principal;
+    // The token proves who this is; the grant, read now, says whether this brain is theirs.
+    if (!options.brainAccess!.mayOpen(principal.login, slug)) {
+      logger.warn('MCP request without a grant on the brain', { brain: slug, login: principal.login });
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const authInfo: AuthInfo = {
       token: principal.token ?? '',
       clientId: principal.clientId ?? '',
