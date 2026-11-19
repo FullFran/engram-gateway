@@ -14,7 +14,7 @@
     "build": "tsc && node -e \"require('node:fs').cpSync('src/shared/gateway-migrations', 'dist/shared/gateway-migrations', { recursive: true })\"",
     "typecheck": "tsc --noEmit",
     "start": "node dist/main.js",
-    "test:unit": "node --test test/unit/*.test.mjs",
+    "test:unit": "node scripts/check-unit-scratch.mjs",
     "test:auth": "node scripts/check-auth.mjs",
     "test:mcp-http": "node scripts/check-mcp-http.mjs",
     "test:bridge": "node scripts/check-bridge.mjs",

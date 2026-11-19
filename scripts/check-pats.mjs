@@ -13,11 +13,12 @@
 //   - a service account works through its own grants and PAT, never signs
 //     in, and disabling it blocks its token
 //   - the gateway database holds no token secret; refusals are audited
-// Scratch state lives outside the repository and is kept (its path is printed).
+// Scratch state lives outside the repository; it is removed on success and
+// kept on failure (its path is printed).
 
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -166,9 +167,10 @@ try {
   console.log(`PAT check passed: ${passed} groups.`);
 } catch (error) {
   console.error(`PAT check failed after ${passed} passing groups: ${error.stack || error.message}`);
+  console.error(`scratch kept: ${scratch}`);
   process.exitCode = 1;
 } finally {
   await github.close();
-  console.log(`scratch kept: ${scratch}`);
 }
+if (process.exitCode !== 1) rmSync(scratch, { recursive: true, force: true });
 process.exit(process.exitCode ?? 0);

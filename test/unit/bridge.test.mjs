@@ -106,6 +106,7 @@ test('a child crash rejects the in-flight call; the next request after the coold
 
 test('after a failed start the bridge cools down (1 s, then doubling) and does not respawn meanwhile', async (t) => {
   const scratch = mkdtempSync(join(tmpdir(), 'bridge-cooldown-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
   const spawns = join(scratch, 'spawns');
   const script = `require('node:fs').appendFileSync(${JSON.stringify(spawns)}, 'x'); process.exit(1)`;
   const bridge = createEngramBridge({ command: process.execPath, args: ['-e', script], logger });
