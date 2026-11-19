@@ -17,8 +17,12 @@ export const UI_PATH = '/ui';
 /** The signed-in user of a request, from the browser session only. */
 export interface UiSession {
   login: string;
-  /** What the session's CSRF token is bound to: the session cookie itself. */
-  binding: string;
+  /**
+   * What the session's CSRF token is bound to: the session cookie itself.
+   * Null when the sign-in names no session cookie: the panel is refused then,
+   * never bound to something stable such as the login.
+   */
+  binding: string | null;
 }
 
 export type UiIdentify = (req: Request) => Promise<UiSession | undefined>;
@@ -41,7 +45,7 @@ export interface UiRouterOptions {
 const STATUS = { invalid: 400, not_found: 404, conflict: 409 } as const;
 
 interface Context {
-  session: UiSession;
+  session: { login: string; binding: string };
   csrf: string;
   isAdmin: boolean;
 }
@@ -91,7 +95,13 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
       res.status(401).type('html').send(renderBarePage('Signed out', 'Your session has ended. Sign in again, then repeat the action.', { href: '/oauth/login?return_to=%2Fui', label: 'Sign in' }));
       return;
     }
-    const context: Context = { session, csrf: csrfTokens.issue(session.binding), isAdmin: options.isAdmin(session.login) };
+    if (session.binding === null) {
+      logger.warn('Panel refused: the sign-in names no session cookie', { login: session.login });
+      res.status(403).type('html').send(renderBarePage('Panel unavailable', 'The panel cannot be used with this sign-in: it has no browser session to bind its forms to.'));
+      return;
+    }
+    const bound = { login: session.login, binding: session.binding };
+    const context: Context = { session: bound, csrf: csrfTokens.issue(bound.binding), isAdmin: options.isAdmin(bound.login) };
     res.locals[CONTEXT] = context;
     next();
   });
@@ -197,8 +207,22 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
     send(res, 404, 'Page not found', '', '<h1>Page not found</h1><p><a href="/ui">Back to the panel</a></p>');
   });
 
-  router.use((error: Error, req: Request, res: Response, next: NextFunction) => {
+  // A form body the parser refuses (too large, too many fields, unknown charset): the client's fault, said on a page.
+  const BODY_ERRORS: Record<string, { status: number; title: string; message: string }> = {
+    'entity.too.large': { status: 413, title: 'Form too large', message: 'This form sent more data than the panel accepts.' },
+    'parameters.too.many': { status: 413, title: 'Form too large', message: 'This form sent more fields than the panel accepts.' },
+    'charset.unsupported': { status: 415, title: 'Form not readable', message: 'This form was sent in an encoding the panel does not read.' },
+    'encoding.unsupported': { status: 415, title: 'Form not readable', message: 'This form was sent in an encoding the panel does not read.' },
+    'entity.parse.failed': { status: 400, title: 'Form not readable', message: 'This form could not be read.' },
+    'request.aborted': { status: 400, title: 'Form not readable', message: 'This form arrived incomplete.' }
+  };
+  router.use((error: Error & { type?: string }, req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) return next(error);
+    const body = error.type !== undefined ? BODY_ERRORS[error.type] : undefined;
+    if (body) {
+      res.status(body.status).type('html').send(renderBarePage(body.title, `${body.message} Reload the page and try again.`, { href: '/ui', label: 'Back to the panel' }));
+      return;
+    }
     logger.error('Panel request failed', { path: req.path, message: error.message });
     res.status(500).type('html').send(renderBarePage('Something went wrong', 'The gateway could not complete this request. Try again later.', { href: '/ui', label: 'Back to the panel' }));
   });

@@ -46,11 +46,12 @@ export function uiSetup(t) {
  * session of `<login>` (`n` tells two sessions of one login apart), and the
  * provider names `sid` as its session cookie, like the GitHub provider.
  */
-export async function uiApp(t, s) {
+/** `sessionCookies: false`: a provider that names no session cookie (the panel cannot bind its CSRF token). */
+export async function uiApp(t, s, { sessionCookies = true } = {}) {
   const sessions = {
     id: 'test',
     session: cookies => (cookies.get('sid') ? { kind: 'ok', identity: { provider: 'test', subject: cookies.get('sid').split('.')[0], via: 'session', scopes: [] } } : { kind: 'none' }),
-    sessionCookieNames: cookies => (cookies.has('sid') ? ['sid'] : [])
+    sessionCookieNames: cookies => (sessionCookies && cookies.has('sid') ? ['sid'] : [])
   };
   const challenge = () => 'Bearer realm="test"';
   const authenticator = new HttpRequestAuthenticator([sessions, patIdentityProvider(s.pats)], ORIGIN, challenge);
