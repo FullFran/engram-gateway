@@ -16,7 +16,8 @@ export const ACCOUNT_NAV: readonly NavItem[] = [
 /** Pages for instance admins only; the services refuse anyone else anyway. */
 export const ADMIN_NAV: readonly NavItem[] = [
   { path: '/ui/brains', label: 'Brains' },
-  { path: '/ui/users', label: 'Users' }
+  { path: '/ui/users', label: 'Users' },
+  { path: '/ui/service-accounts', label: 'Service accounts' }
 ];
 
 /** What every page shows around its content. */

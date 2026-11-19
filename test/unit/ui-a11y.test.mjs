@@ -49,6 +49,14 @@ test('axe: every panel page and state has no violation', async t => {
   pages['user grants, an admin'] = await call('/ui/users/boss', { as: 'boss' });
   await call('/ui/users', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, login: 'newbie' } });
   pages['user grants, none'] = await call('/ui/users/newbie', { as: 'boss' });
+  pages['service accounts, none'] = await call('/ui/service-accounts', { as: 'boss' });
+  pages['service accounts, refused'] = await call('/ui/service-accounts', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, login: 'dev' } });
+  await call('/ui/service-accounts', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, login: 'ci-bot' } });
+  pages['service accounts'] = await call('/ui/service-accounts', { as: 'boss' });
+  pages['service account, no grant'] = await call('/ui/service-accounts/ci-bot', { as: 'boss' });
+  await call('/ui/users/ci-bot/grants', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, brain: 'alpha', role: 'writer' } });
+  pages['service account, token created'] = await call('/ui/service-accounts/ci-bot/tokens', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, name: 'deploy', brains: 'alpha', scope: 'read', expires: '30' } });
+  pages['service account, token refused'] = await call('/ui/service-accounts/ci-bot/tokens', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, name: '', brains: 'alpha', scope: 'read', expires: '30' } });
   pages['not found'] = await call('/ui/nope', { as: 'dev' });
   pages['form refused'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { name: 'x' } });
   pages['signed out'] = await call('/ui/tokens', { method: 'POST', form: { name: 'x' } });
