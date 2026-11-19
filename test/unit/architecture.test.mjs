@@ -104,3 +104,17 @@ test('audit: domain is pure, application uses only its domain and ports, and aud
     }
   }
 });
+
+test('health reads the brain DB itself: it never imports the bridge, http or auth, and its domain is pure', () => {
+  const dir = join(src, 'health');
+  assert.ok(statSync(dir, { throwIfNoEntry: false })?.isDirectory(), 'src/health exists');
+  for (const file of files(dir)) {
+    for (const spec of imports(file)) {
+      const to = target(file, spec);
+      for (const other of ['bridge/', 'http/', 'auth/', '@modelcontextprotocol/']) assert.ok(!to.startsWith(other), `${relative(src, file)} imports ${spec}`);
+    }
+  }
+  for (const file of files(join(dir, 'domain'))) {
+    for (const spec of imports(file)) assert.ok(target(file, spec).startsWith('health/domain/'), `${relative(src, file)} imports ${spec}`);
+  }
+});
