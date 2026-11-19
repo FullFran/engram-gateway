@@ -6,6 +6,8 @@
  */
 export { checkChoice, describeProblem, isConnectionName, rolesUpTo } from './domain/connection.js';
 export type { ChoiceCheck, ChoiceProblem, Connection, ConnectionBrain, ConnectionChoice, ConnectionKind } from './domain/connection.js';
+export { ALL_BRAINS, BRAIN_ARGUMENT, FAN_OUT_TOOLS, mergeFanOut, resolveTarget, withBrainArgument } from './domain/brain-argument.js';
+export type { BrainOutcome, BrainTarget } from './domain/brain-argument.js';
 export { ConnectionNameTakenError } from './application/ports.js';
 export type { ConnectionReader, ConnectionStore } from './application/ports.js';
 export { ConnectionConsentService, NO_ROLE } from './application/connection-consent.js';

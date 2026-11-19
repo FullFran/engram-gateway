@@ -6,7 +6,11 @@ import type { GrantReader } from './ports.js';
  * The OAuth server's access policy backed by grants (#6):
  * - sign-in: an active user who is an admin or holds any grant; an invited
  *   one (#10) is let in and activated by that first successful sign-in;
- * - a token (issue, consent, refresh) for a brain's resource: a grant on that brain.
+ * - a token (issue, consent, refresh) for a brain's resource: a grant on that brain;
+ * - for the bare `/mcp` resource: any grant. Its consent makes a connection
+ *   (#27) whose brains are each checked per call; a token for it without a
+ *   connection (issued before connections) is still checked against the
+ *   default brain on every request by the MCP endpoint.
  * A token already issued is checked per request by the MCP endpoint, which
  * answers 403 once the grant is gone.
  */
@@ -29,6 +33,7 @@ export class GrantAccessPolicy implements AccessPolicy {
 
   mayUse(login: string, resource: string): boolean {
     if (!this.resources.includes(resource)) return false;
+    if (resource === this.base) return this.grants.grantsOf(login).length > 0;
     const brain = brainOfResource(resource, this.base);
     return brain !== undefined && this.grants.roleOf(login, brain) !== undefined;
   }

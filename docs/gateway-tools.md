@@ -27,6 +27,12 @@ connection tools (#12, #27) build on the same mechanism.
   `clientId` and the effective `role` the authorize stage decided (absent with
   auth off). Tools act on behalf of that caller instead of looking it up
   around the pipeline.
+- **Connections on `/mcp` (#27):** the connection server
+  (`src/bridge/connection-server.ts`) serves the same gateway tools with the
+  same pipeline. They get the `brain` argument like engram's tools, `brain`
+  in the context is the brain the call was routed to, `caller.connectionId`
+  is set, and `role` is the weaker of the user's grant and the connection's
+  role.
 
 ## Adding a tool
 

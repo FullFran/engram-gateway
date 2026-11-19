@@ -3,7 +3,7 @@
 // FAKE_SPAWN_LOG: append one byte per start.
 // Tools: echo (ok), fail (isError), crash (exits the process), slow (never answers),
 // mem_save (returns the arguments it received, so tests can see what reached the server),
-// mem_search (returns `text` as stored memory, with structured content).
+// mem_search (returns `text` as stored memory, with structured content; FAKE_BRAIN / FAKE_SLOW_SEARCH, see below).
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { TOOLS } from './fake-tools.mjs';
 import { Server } from '@modelcontextprotocol/server';
@@ -21,7 +21,12 @@ const factory = () => {
     if (name === 'fail') return { content: [{ type: 'text', text: 'boom' }], isError: true };
     if (name === 'crash') process.exit(3);
     if (name === 'mem_save') return { content: [{ type: 'text', text: JSON.stringify(args) }], structuredContent: { received: args } };
-    if (name === 'mem_search') return { content: [{ type: 'text', text: args.text }], structuredContent: { results: [{ id: 1, content: args.text }] } };
+    if (name === 'mem_search') {
+      // FAKE_BRAIN: tags results with the brain this child serves; FAKE_SLOW_SEARCH: never answers.
+      if (process.env.FAKE_SLOW_SEARCH) return new Promise(() => {});
+      const brain = process.env.FAKE_BRAIN;
+      return { content: [{ type: 'text', text: brain ? `${brain}: ${args.text}` : args.text }], structuredContent: { results: [{ id: 1, content: args.text, ...(brain ? { brain } : {}) }] } };
+    }
     if (name === 'slow') return new Promise(() => {});
     return { content: [{ type: 'text', text: `unknown tool ${name}` }], isError: true };
   });

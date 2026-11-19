@@ -4,9 +4,11 @@ import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/
 import type { McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
 import { ToolCallDeniedError, createToolCallPipeline, runToolCall } from '../pipeline/index.js';
-import type { ToolCallContext, ToolCaller, ToolCallPipeline, ToolCallResult } from '../pipeline/index.js';
+import type { ToolCallContext, ToolCaller, ToolCallPipeline, ToolCallRequest, ToolCallResult } from '../pipeline/index.js';
 import { mergeToolLists } from '../gateway-tools/index.js';
 import type { GatewayToolContext, GatewayToolSet } from '../gateway-tools/index.js';
+
+type Tool = Awaited<ReturnType<Client['listTools']>>['tools'][number];
 
 export interface EngramBridgeOptions {
   /** Executable to spawn, normally `engram`. */
@@ -52,6 +54,12 @@ export interface EngramBridge {
   live(): boolean;
   /** Milliseconds until a new child may be started after a failure; 0 when none is pending. */
   retryAfterMs(): number;
+  /** Engram's tools, unfiltered (the connection server filters them per brain). */
+  listTools(): Promise<Tool[]>;
+  /** Forwards one call to Engram as is: no pipeline (the caller runs it). */
+  callTool(call: ToolCallRequest): Promise<ToolCallResult>;
+  /** Engram's version and instructions, as its `initialize` answer gave them. */
+  serverInfo(): Promise<{ version: string; instructions?: string }>;
 }
 
 const GATEWAY_NAME = 'engram-gateway';
@@ -63,7 +71,7 @@ const COOLDOWN_MAX_MS = 30_000;
 const STABLE_UPTIME_MS = 60_000;
 
 /** The caller of one HTTP request, from the validated token's auth info (login in `extra.login`). */
-function callerOf(authInfo: { clientId?: string; extra?: Record<string, unknown> } | undefined): ToolCaller | undefined {
+export function callerOf(authInfo: { clientId?: string; extra?: Record<string, unknown> } | undefined): ToolCaller | undefined {
   if (!authInfo) return undefined;
   const login = authInfo.extra?.login;
   const connectionId = authInfo.extra?.connectionId;
@@ -75,7 +83,7 @@ function callerOf(authInfo: { clientId?: string; extra?: Record<string, unknown>
 }
 
 /** The pipeline's view of the call, as a gateway tool sees it: brain, caller and the role authorize decided. */
-function gatewayToolContext(ctx: ToolCallContext): GatewayToolContext {
+export function gatewayToolContext(ctx: ToolCallContext): GatewayToolContext {
   if (!ctx.caller) return { brain: ctx.brain };
   return { brain: ctx.brain, caller: { ...ctx.caller, ...(ctx.role !== undefined ? { role: ctx.role } : {}) } };
 }
@@ -207,6 +215,25 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
     },
     retryAfterMs() {
       return Math.max(0, coolUntil - now());
+    },
+    async listTools() {
+      const client = await upstream();
+      const tools: Tool[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await client.listTools(cursor !== undefined ? { cursor } : undefined);
+        tools.push(...page.tools);
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+      return tools;
+    },
+    async callTool(call) {
+      return (await (await upstream()).callTool(call)) as ToolCallResult;
+    },
+    async serverInfo() {
+      const client = await upstream();
+      const instructions = client.getInstructions();
+      return { version: client.getServerVersion()?.version ?? FALLBACK_VERSION, ...(instructions !== undefined ? { instructions } : {}) };
     }
   };
 }

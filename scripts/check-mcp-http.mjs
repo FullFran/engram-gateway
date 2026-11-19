@@ -266,10 +266,8 @@ async function checkRoles(github) {
     const reader = await githubLogin(base, github, 'reader-r');
     assert(reader.jar, `a user with a grant signs in: ${reader.poll.text.slice(0, 200)}`);
     const readerAlpha = await obtainToken(base, reader.jar, `${base}/mcp/alpha`);
-    for (const resource of [`${base}/mcp/default`, undefined]) {
-      const refused = await obtainToken(base, reader.jar, resource);
-      assertEqual(refused.page.status, 403, `no token without a grant (${resource ?? '/mcp'})`);
-    }
+    const refused = await obtainToken(base, reader.jar, `${base}/mcp/default`);
+    assertEqual(refused.page.status, 403, 'no token without a grant (/mcp/default)');
     const readerBeta = await obtainToken(base, reader.jar, `${base}/mcp/beta`);
     const stranger = await githubLogin(base, github, 'stranger-s');
     assertEqual(stranger.jar, null, 'a login with no grant and not an admin cannot sign in');
@@ -466,6 +464,68 @@ async function checkConnections(github) {
   }
 }
 
+async function checkConnectionRouting(github) {
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const dataDir = join(scratch, `data-${port}`);
+  // owner-o owns alpha, beta and gamma and has no grant on default.
+  const gateway = await startGateway(scratch, {
+    PORT: String(port), BRAINS_ROOT: join(scratch, `brains-${port}`), BRAINS: 'alpha,beta,gamma',
+    ...githubEnv(port, github.url, dataDir, { BRAIN_GRANTS: 'owner-o:alpha:owner,owner-o:beta:owner,owner-o:gamma:owner' })
+  });
+  const bearer = token => ({ authorization: `Bearer ${token}` });
+  const enumOf = (list, name) => list.result.result.tools.find(tool => tool.name === name)?.inputSchema?.properties?.brain?.enum;
+  const tag = `seedmark${Date.now()}`;
+  try {
+    const owner = await githubLogin(base, github, 'owner-o');
+    // Seed each brain with its own memory through single-brain tokens.
+    const single = {};
+    for (const brain of ['alpha', 'beta', 'gamma']) {
+      single[brain] = (await obtainToken(base, owner.jar, `${base}/mcp/${brain}`)).accessToken;
+      const seeded = await mcpCall(base, `/mcp/${brain}`, 'mem_save', { title: `${brain} seed`, content: `${tag} lives in ${brain}`, type: 'discovery' }, bearer(single[brain]));
+      assert(seeded.result?.result && !seeded.result.result.isError, `seed ${brain}: ${seeded.text.slice(0, 200)}`);
+    }
+    const connection = await obtainToken(base, owner.jar, undefined, { connection_name: 'routing', 'role:alpha': 'reader', 'role:beta': 'writer', 'role:gamma': 'none', default_brain: 'alpha' });
+    assert(connection.accessToken, `a user without a grant on default connects /mcp to its brains: ${connection.page.text.slice(0, 200)}`);
+    const token = bearer(connection.accessToken);
+
+    const list = await mcpToolsList(base, '/mcp', token);
+    assertEqual(list.status, 200, `tools/list on /mcp: ${list.text.slice(0, 200)}`);
+    assertEqual(JSON.stringify(enumOf(list, 'mem_save')), '["alpha","beta"]', 'the brain argument names exactly the connection\'s brains');
+    assertEqual(JSON.stringify(enumOf(list, 'mem_search')), '["alpha","beta","*"]', 'fan-out read tools also take "*"');
+    ok('tools/list on /mcp: a `brain` argument naming exactly the connection\'s brains');
+
+    const marker = `routed-${Date.now()}`;
+    const denied = await mcpCall(base, '/mcp', 'mem_save', { brain: 'alpha', title: marker, content: `${marker} in alpha`, type: 'discovery' }, token);
+    assertEqual(denied.result?.error?.code, -32602, `mem_save on a reader brain is an MCP error: ${denied.text.slice(0, 200)}`);
+    const saved = await mcpCall(base, '/mcp', 'mem_save', { brain: 'beta', title: marker, content: `${marker} in beta`, type: 'discovery' }, token);
+    assert(saved.result?.result && !saved.result.result.isError, `mem_save on the writer brain: ${saved.text.slice(0, 200)}`);
+    const inAlpha = toolText((await mcpCall(base, '/mcp/alpha', 'mem_search', { query: marker }, bearer(single.alpha))).result);
+    const inBeta = toolText((await mcpCall(base, '/mcp/beta', 'mem_search', { query: marker }, bearer(single.beta))).result);
+    assert(/No memories found/.test(inAlpha), `alpha unchanged: ${inAlpha.slice(0, 200)}`);
+    assert(inBeta.includes(`${marker} in beta`), `the write went to beta: ${inBeta.slice(0, 200)}`);
+    ok('per-call routing: the reader brain refuses mem_save (engram unchanged), the writer brain takes it');
+
+    const all = await mcpCall(base, '/mcp', 'mem_search', { brain: '*', query: tag }, token);
+    const text = toolText(all.result);
+    assert(/^brain: alpha$/m.test(text) && /^brain: beta$/m.test(text) && !/brain: gamma/.test(text), `sections for alpha and beta only: ${text.slice(0, 400)}`);
+    assert(text.includes(`${tag} lives in alpha`) && text.includes(`${tag} lives in beta`) && !text.includes(`${tag} lives in gamma`), `results from attached brains only: ${text.slice(0, 400)}`);
+    assertEqual(JSON.stringify(all.result.result.structuredContent?.results?.map(r => r.brain)), '["alpha","beta"]', 'one structured result per brain');
+    ok('brain "*" searches every attached brain and labels each result; a granted but unattached brain is left out');
+
+    const writable = new DatabaseSync(join(dataDir, 'gateway.db'));
+    writable.exec('PRAGMA busy_timeout = 5000');
+    writable.prepare("DELETE FROM connection_brains WHERE brain_id = (SELECT id FROM brains WHERE slug = 'beta')").run();
+    writable.close();
+    assertEqual(JSON.stringify(enumOf(await mcpToolsList(base, '/mcp', token), 'mem_search')), '["alpha","*"]', 'a detached brain leaves the list on the next request');
+    const afterDetach = await mcpCall(base, '/mcp', 'mem_search', { brain: 'beta', query: tag }, token);
+    assertEqual(afterDetach.result?.error?.code, -32602, `a call to a detached brain is refused: ${afterDetach.text.slice(0, 200)}`);
+    ok('detaching a brain applies to the next request (same token)');
+  } finally {
+    await gateway.stop();
+  }
+}
+
 const github = await startFakeGitHub();
 try {
   console.log(`MCP HTTP checks (scratch: ${scratch})`);
@@ -477,6 +537,7 @@ try {
   await checkRoles(github);
   await checkAdmin(github);
   await checkConnections(github);
+  await checkConnectionRouting(github);
   console.log(`MCP HTTP check passed: ${passed} groups.`);
 } catch (error) {
   console.error(`MCP HTTP check failed after ${passed} passing groups: ${error.stack || error.message}`);

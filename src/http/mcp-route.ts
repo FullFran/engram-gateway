@@ -24,6 +24,14 @@ export const MCP_DEFAULT_BRAIN = 'default';
 export const MCP_BRAIN_LOCAL = 'mcpBrain';
 
 /**
+ * Express `res.locals` key an authentication middleware sets (to `true`) when
+ * a request on the bare endpoint carries a connection token (#27): it is then
+ * served by `connectionServer` (every brain of the connection) instead of the
+ * default brain's bridge.
+ */
+export const MCP_CONNECTION_LOCAL = 'mcpConnection';
+
+/**
  * What the MCP endpoint needs from the brains: which slugs exist, and a
  * lease on a brain's server factory for the duration of one request.
  */
@@ -71,6 +79,8 @@ export interface McpHttpRouterOptions {
   authMiddleware?: RequestHandler[];
   /** Request body limit, matching the REST API's JSON limit. */
   bodyLimit?: string;
+  /** Serves connection requests (`res.locals[MCP_CONNECTION_LOCAL]`); it leases brains per call itself. */
+  connectionServer?: McpServerFactory;
 }
 
 // Hop-by-hop headers describe the Node connection, not the request; they must
@@ -213,7 +223,26 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
     res.status(503).json({ error: 'brain_unavailable' });
   };
 
+  /** Hands one request to an SDK handler; the client going away aborts it. */
+  const handle = async (factory: McpServerFactory, req: ExpressRequest, res: ExpressResponse, next: NextFunction, controller: AbortController): Promise<void> => {
+    try {
+      const authInfo = res.locals[MCP_AUTH_INFO_LOCAL] as AuthInfo | undefined;
+      const response = await handlerFor(factory).fetch(toWebRequest(req, controller.signal), authInfo ? { authInfo } : undefined);
+      await sendWebResponse(response, res, options.logger);
+    } catch (error) {
+      next(error);
+    }
+  };
+
   const serve = async (req: ExpressRequest, res: ExpressResponse, next: NextFunction): Promise<void> => {
+    if (res.locals[MCP_CONNECTION_LOCAL] === true && options.connectionServer) {
+      const controller = new AbortController();
+      res.on('close', () => {
+        if (!res.writableFinished) controller.abort();
+      });
+      await handle(options.connectionServer, req, res, next, controller);
+      return;
+    }
     const slug = res.locals[MCP_BRAIN_LOCAL] as string;
     let lease: Awaited<ReturnType<McpBrains['acquire']>>;
     try {
@@ -245,13 +274,7 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
         return;
       }
     }
-    try {
-      const authInfo = res.locals[MCP_AUTH_INFO_LOCAL] as AuthInfo | undefined;
-      const response = await handlerFor(process.factory).fetch(toWebRequest(req, controller.signal), authInfo ? { authInfo } : undefined);
-      await sendWebResponse(response, res, options.logger);
-    } catch (error) {
-      next(error);
-    }
+    await handle(process.factory, req, res, next, controller);
   };
 
   const router = express.Router();

@@ -292,9 +292,31 @@ applies to the next request.
   that one brain.
 - **Tokens and refreshes** carry the connection id; a refreshed token keeps
   it.
-- **Routing.** For now a connection token on `/mcp` serves the `default`
-  brain, at the connection's role there (no role there: every tool is
-  refused). Choosing a brain per call follows in the next change.
+- **Any grant opens `/mcp`.** A user may connect a client on `/mcp` with
+  a grant on any brain (not necessarily `default`). A `/mcp` token without a
+  connection (issued before connections) still needs a grant on `default`
+  (403 otherwise).
+- **Choosing a brain per call.** On `/mcp`, every tool (Engram's and the
+  gateway's own, such as `brain_health`) takes an optional `brain` argument
+  whose `enum` is exactly the connection's brains; `tools/list` shows a tool
+  when the connection may call it on at least one of them. A call without
+  `brain` goes to the connection's default brain. Each call runs the whole
+  pipeline (authorize, redact, forward, audit, wrap) on its brain, holding
+  that brain only for the call. `brain` is not forwarded to Engram.
+- **All brains at once.** `brain: "*"` runs a read tool (`mem_search`,
+  `mem_context`, `mem_search_prompts`, `mem_timeline`, `mem_list_projects`,
+  `mem_stats`) on every brain of the connection, one after the other, each
+  through the whole pipeline (one audit row per brain). The result has a
+  `brain: <slug>` text item before each brain's items and
+  `structuredContent.results` with one `{ brain, structuredContent }` or
+  `{ brain, error }` per brain; it is an error only when every brain failed.
+  The whole call is bounded (20 s): a brain that has not answered by then is
+  reported as `timed out`, and the brains not reached yet too.
+- **Failing closed.** A brain outside the connection, an unknown brain, a
+  brain the user lost the grant on, a call without `brain` when the default
+  brain was detached, or a deleted connection: an MCP error (`-32602`) with
+  the reason, never a call to Engram. Detaching a brain or revoking a grant
+  applies to the next request.
 - **Audit and authorship.** The audit row of a call through a connection has
   `connectionId` in its metadata, and author attribution records the
   connection of the first and the last write

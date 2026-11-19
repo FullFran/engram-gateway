@@ -6,8 +6,8 @@ import type { Logger } from '../shared/logger.js';
 import type { HttpRequestAuthenticator } from '../auth/index.js';
 import { ADMIN_API_PATH } from '../admin/index.js';
 import type { AdminIdentify } from '../admin/index.js';
-import { MCP_AUTH_INFO_LOCAL, MCP_BRAIN_LOCAL, MCP_DEFAULT_BRAIN, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
-import type { McpBrains } from './mcp-route.js';
+import { MCP_AUTH_INFO_LOCAL, MCP_BRAIN_LOCAL, MCP_CONNECTION_LOCAL, MCP_DEFAULT_BRAIN, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
+import type { McpBrains, McpServerFactory } from './mcp-route.js';
 
 /** Service name reported on `/health`. */
 export const GATEWAY_SERVICE = 'engram-gateway';
@@ -62,6 +62,12 @@ export interface GatewayAppOptions {
   brains: McpBrains & { stats(): { live: number; idle: number } };
   /** `GET /admin/brains/<slug>/health`; absent: no admin endpoints. */
   admin?: AdminApi;
+  /**
+   * Serves a connection token on the bare `/mcp` (#27): every brain of the
+   * connection, chosen per call. Without it a connection token on `/mcp` is
+   * served by the default brain like any other token.
+   */
+  connectionServer?: McpServerFactory;
   logger: Logger;
 }
 
@@ -137,8 +143,12 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
       return;
     }
     const principal = result.principal;
+    // A connection token on the bare endpoint picks a brain per call; each
+    // call checks the grant and the connection's role on its brain.
+    const connectionMode = principal.connectionId !== undefined && req.path === '/' && options.connectionServer !== undefined;
+    if (connectionMode) res.locals[MCP_CONNECTION_LOCAL] = true;
     // The token proves who this is; the grant, read now, says whether this brain is theirs.
-    if (!options.brainAccess!.mayOpen(principal.login, slug)) {
+    else if (!options.brainAccess!.mayOpen(principal.login, slug)) {
       logger.warn('MCP request without a grant on the brain', { brain: slug, login: principal.login });
       res.status(403).json({ error: 'forbidden' });
       return;
@@ -164,7 +174,8 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
     logger,
     bindHost: options.bindHost,
     ...(options.publicBaseUrl ? { publicBaseUrl: options.publicBaseUrl } : {}),
-    authMiddleware: [mcpAuth]
+    authMiddleware: [mcpAuth],
+    ...(options.connectionServer ? { connectionServer: options.connectionServer } : {})
   });
   app.use(MCP_HTTP_PATH, mcpRouter);
 
