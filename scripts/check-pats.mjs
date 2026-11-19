@@ -5,7 +5,8 @@
 //   - a signed-in user creates PATs from /account/api (secret shown once)
 //   - a `read` PAT of a writer cannot save (MCP error, engram unchanged);
 //     a `read+write` PAT saves; both on the bare /mcp as a Bearer token
-//   - /mcp/<slug> for a brain outside the token is 403
+//   - on /mcp/<slug> a read PAT cannot save (engram unchanged); a brain
+//     outside the token is 403
 //   - revoked and expired tokens get 401 with the standard WWW-Authenticate
 //   - revoking the owner's grant, then disabling the owner, block the token
 //     on the next request
@@ -73,8 +74,13 @@ async function checkPats(github) {
 
     // --- /mcp/<slug>: its own brain only ---
     assertEqual((await mcpToolsList(base, '/mcp/default', bearer(reading.body.token))).status, 200, 'its brain on /mcp/default');
+    const slugMarker = `${marker}-slug`;
+    const slugDenied = await mcpCall(base, '/mcp/default', 'mem_save', { title: slugMarker, content: `read PAT wrote ${slugMarker}`, type: 'discovery' }, bearer(reading.body.token));
+    assertEqual(slugDenied.result?.error?.code, -32602, `mem_save with a read PAT on /mcp/default is an MCP error: ${slugDenied.text.slice(0, 200)}`);
+    const slugNothing = await mcpCall(base, '/mcp/default', 'mem_search', { query: slugMarker }, bearer(writing.body.token));
+    assert(/No memories found/.test(toolText(slugNothing.result)), `nothing was saved through /mcp/default: ${toolText(slugNothing.result).slice(0, 200)}`);
     assertEqual((await mcpToolsList(base, '/mcp/alpha', bearer(reading.body.token))).status, 403, 'alpha is outside the token (dev-d has a grant there)');
-    ok('a PAT on /mcp/<slug> is refused for a brain outside it');
+    ok('a PAT on /mcp/<slug>: a read PAT cannot write its own brain (engram unchanged); a brain outside it is refused');
 
     // --- revoked and expired: 401 with the standard challenge ---
     const revoke = await request(base, { method: 'DELETE', path: `/account/api/tokens/${reading.body.id}`, headers: { cookie: cookieHeader(jar), origin: base, 'content-type': 'application/json' } });
