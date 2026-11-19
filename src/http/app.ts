@@ -4,6 +4,8 @@ import type { IncomingMessage } from 'node:http';
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
 import type { HttpRequestAuthenticator } from '../auth/index.js';
+import { ADMIN_API_PATH } from '../admin/index.js';
+import type { AdminIdentify } from '../admin/index.js';
 import { MCP_AUTH_INFO_LOCAL, MCP_BRAIN_LOCAL, MCP_DEFAULT_BRAIN, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
 import type { McpBrains } from './mcp-route.js';
 
@@ -48,6 +50,14 @@ export interface GatewayAppOptions {
    * before any MCP processing. Required when `auth` is set.
    */
   brainAccess?: BrainAccess;
+  /**
+   * Builds the admin API router (#10) from the request's identity (signed-in
+   * browser session only). Mounted at `/admin/api` when auth is on; with auth
+   * off there is no identity, so the admin API does not exist (use the CLI).
+   * Separate from `admin` (#28, the read-only brain health endpoint, which is
+   * open on loopback with auth off).
+   */
+  adminApi?: (identify: AdminIdentify) => express.Router;
   /** The brains served at `/mcp/<slug>` (`/mcp`: the default brain), with live/idle counts for `/health/brains`. */
   brains: McpBrains & { stats(): { live: number; idle: number } };
   /** `GET /admin/brains/<slug>/health`; absent: no admin endpoints. */
@@ -91,6 +101,18 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
   });
 
   if (auth) app.use(auth.router);
+
+  if (auth && options.adminApi) {
+    // Session cookie only: the Authorization header is dropped, so an MCP
+    // access token (audience `/mcp...`) can never act on the admin API.
+    const identify: AdminIdentify = async req => {
+      const headers = { authorization: undefined, cookie: single(req.headers.cookie) };
+      await auth.authenticator.prepare(headers);
+      const result = auth.authenticator.authenticate(headers, { resource: auth.resource, acceptSession: true });
+      return result.ok ? result.principal.login : undefined;
+    };
+    app.use(ADMIN_API_PATH, options.adminApi(identify));
+  }
 
   /** Audiences a token may carry for this request's brain; the first is the canonical one. */
   const audiences = (base: string, slug: string, bare: boolean): string[] => {

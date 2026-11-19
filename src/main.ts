@@ -10,12 +10,16 @@
  * Backups (`BACKUP_*`, see `resolveBackupConfig`): a daily in-process
  * timer and a local control socket for the CLI (`node dist/cli.js`).
  *
+ * The admin API (#10, `/admin/api`, auth on only) and the operator CLI
+ * (`node dist/cli.js admin ...`) manage brains, users and grants in the same database.
+ *
  * Bridge settings: ENGRAM_BIN (default `engram`), ENGRAM_ARGS (default
  * `mcp`, split on whitespace). Brain settings: see `resolveBrainsConfig`.
  */
 import { chmodSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
+import { AdminService, SqliteAdminStore, createAdminRouter, fsBrainDirectories } from './admin/index.js';
 import { SqliteAuthorshipRepository, createAttributor } from './attribution/index.js';
 import { ANONYMOUS_ACTOR, SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
@@ -59,7 +63,8 @@ async function main(): Promise<void> {
   const dbPath = resolveGatewayDbPath(process.env);
   const db = openGatewayDatabase(dbPath);
   if (dbPath === ':memory:') logger.info('No GATEWAY_DATA_DIR: gateway state (brains table) is kept in memory');
-  const brains = bootstrapBrains(new SqliteBrainRepository(db), brainsConfig, logger);
+  const brainRepo = new SqliteBrainRepository(db);
+  const brains = bootstrapBrains(brainRepo, brainsConfig, logger);
 
   // Every brain is its own protected resource: `/mcp/<slug>`; `/mcp` stays the default brain's.
   const resourcePaths = [MCP_HTTP_PATH, ...brains.map(brain => `${MCP_HTTP_PATH}/${brain.slug}`)];
@@ -109,7 +114,9 @@ async function main(): Promise<void> {
   const command = process.env.ENGRAM_BIN?.trim() || 'engram';
   const args = (process.env.ENGRAM_ARGS?.trim() || 'mcp').split(/\s+/);
   const registry = new BrainRegistry({
-    brains: new Map(brains.map(brain => [brain.slug, brain])),
+    // Read on every request: brains created or archived by the admin API or
+    // CLI are served or refused without a restart.
+    brains: { get: slug => brainRepo.findActive(slug) },
     createProcess: brain => {
       mkdirSync(brain.dataDir, { recursive: true, mode: 0o700 });
       return createEngramBridge({ command, args, pipeline, gatewayTools, env: buildChildEnv(brain, process.env), logger, brain: brain.slug });
@@ -145,11 +152,17 @@ async function main(): Promise<void> {
       ...(dbPath === ':memory:' ? {} : { gatewayDbPath: dbPath }),
       // Stop the child and hold requests, then take the brain's exclusive lock
       // (refused while another gateway, e.g. mid-deploy, serves it).
-      quiesce: (slug, work) => registry.quiesce(slug, () => {
-        const lock = brainLocks.get(slug);
-        if (!lock) throw new Error(`unknown brain: ${slug}`);
-        return lock.withExclusive(work);
-      }),
+      // An archived brain (#10) is not served, so no request can start its
+      // child: stop the one still running (archived from the CLI) and take
+      // the lock; its data keeps being backed up.
+      quiesce: (slug, work) => {
+        const exclusive = () => {
+          const lock = brainLocks.get(slug);
+          if (!lock) throw new Error(`unknown brain: ${slug}`);
+          return lock.withExclusive(work);
+        };
+        return registry.has(slug) ? registry.quiesce(slug, exclusive) : registry.stop(slug).then(exclusive);
+      },
       clock: { now: () => Date.now() },
       logger,
       snapshotter: sqliteSnapshotter
@@ -191,6 +204,16 @@ async function main(): Promise<void> {
         });
       }
     },
+    adminApi: identify => createAdminRouter({
+      service: new AdminService({
+        store: new SqliteAdminStore(db),
+        dirs: fsBrainDirectories(brainsConfig.brainsRoot),
+        clock: { nowMs: () => Date.now() },
+        runtime: registry
+      }),
+      identify,
+      logger
+    }),
     logger
   });
   const server = createServer(app);

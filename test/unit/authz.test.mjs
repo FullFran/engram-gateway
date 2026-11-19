@@ -100,6 +100,31 @@ test('startup sync: admins own every brain, BRAIN_GRANTS rows exist, nothing els
   assert.deepEqual(users, ['alice', 'bob', 'carol', 'dave', 'FullFran'], 'users rows are kept (history), only grants and the admin flag change');
 });
 
+test('startup sync rewrites only configuration grants: an API grant survives a restart (#10)', t => {
+  const db = scratchDb(t);
+  const brains = withBrains(db, ['default', 'work', 'team']);
+  const repo = new SqliteGrantRepository(db);
+  bootstrapAccess(repo, { admins: ['FullFran'], grants: [{ login: 'alice', brain: 'work', role: 'reader' }], brains });
+  // What the admin API writes: a user and a grant marked `api`.
+  db.prepare("INSERT INTO users (github_login) VALUES ('erin')").run();
+  db.prepare("INSERT INTO grants (user_id, brain_id, role, source) SELECT u.id, b.id, 'writer', 'api' FROM users u, brains b WHERE u.github_login = 'erin' AND b.slug = 'team'").run();
+  db.prepare("INSERT INTO grants (user_id, brain_id, role, source) SELECT u.id, b.id, 'owner', 'api' FROM users u, brains b WHERE u.github_login = 'alice' AND b.slug = 'team'").run();
+
+  bootstrapAccess(repo, { admins: ['FullFran'], grants: [{ login: 'alice', brain: 'work', role: 'writer' }], brains });
+  assert.equal(repo.roleOf('erin', 'team'), 'writer', 'an API grant survives the restart');
+  assert.equal(repo.roleOf('alice', 'team'), 'owner', 'an API grant of a configured user survives too');
+  assert.equal(repo.roleOf('alice', 'work'), 'writer', 'configuration grants follow BRAIN_GRANTS');
+  const sources = db.prepare(`SELECT u.github_login AS login, b.slug AS brain, g.source FROM grants g JOIN users u ON u.id = g.user_id JOIN brains b ON b.id = g.brain_id
+    WHERE u.github_login IN ('alice', 'erin') ORDER BY login, brain`).all().map(row => `${row.login}:${row.brain}:${row.source}`);
+  assert.deepEqual(sources, ['alice:team:api', 'alice:work:config', 'erin:team:api']);
+
+  // A BRAIN_GRANTS entry for the same login and brain takes the row over: configuration wins.
+  bootstrapAccess(repo, { admins: ['FullFran'], grants: [{ login: 'erin', brain: 'team', role: 'reader' }], brains });
+  assert.equal(repo.roleOf('erin', 'team'), 'reader');
+  assert.equal(db.prepare("SELECT g.source FROM grants g JOIN users u ON u.id = g.user_id WHERE u.github_login = 'erin'").get().source, 'config');
+  assert.equal(repo.roleOf('alice', 'work'), undefined, 'a configuration grant removed from BRAIN_GRANTS is still revoked');
+});
+
 test('startup sync fails loudly on an unknown brain or a grant for an admin, and changes nothing', t => {
   const db = scratchDb(t);
   const brains = withBrains(db, ['default']);

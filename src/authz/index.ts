@@ -8,6 +8,7 @@ export type { Role } from './domain/role.js';
 export { GATEWAY_TOOL_ROLES, TOOL_ROLES, requiredRole } from './domain/tool-roles.js';
 export { decideTool, effectiveRole } from './domain/decision.js';
 export type { AccessGrants, DenyReason, ToolDecision } from './domain/decision.js';
+export { isGitHubLogin } from './domain/brain-grant.js';
 export type { BrainGrant } from './domain/brain-grant.js';
 export { brainOfResource } from './domain/resource.js';
 export type { AccessSnapshot, GrantReader, GrantStore } from './application/ports.js';

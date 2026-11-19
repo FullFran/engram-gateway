@@ -4,7 +4,8 @@ import type { GrantReader } from './ports.js';
 
 /**
  * The OAuth server's access policy backed by grants (#6):
- * - sign-in: an active user who is an admin or holds any grant;
+ * - sign-in: an active user who is an admin or holds any grant; an invited
+ *   one (#10) is let in and activated by that first successful sign-in;
  * - a token (issue, consent, refresh) for a brain's resource: a grant on that brain.
  * A token already issued is checked per request by the MCP endpoint, which
  * answers 403 once the grant is gone.
@@ -19,7 +20,7 @@ export class GrantAccessPolicy implements AccessPolicy {
   }
 
   maySignIn(login: string): boolean {
-    return this.grants.hasAccess(login);
+    return this.grants.admitSignIn(login);
   }
 
   describeResource(resource: string): { name: string } | undefined {

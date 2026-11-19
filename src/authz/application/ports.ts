@@ -8,9 +8,15 @@ export interface GrantReader {
   /** An active user who is an instance admin or holds at least one grant. */
   hasAccess(login: string): boolean;
   isAdmin(login: string): boolean;
+  /**
+   * The sign-in gate: `hasAccess`, except that an invited user (#10) with
+   * access is let in and becomes active (the first successful sign-in
+   * activates an invite). A disabled user is refused.
+   */
+  admitSignIn(login: string): boolean;
 }
 
-/** What startup writes: the instance admins and every grant, replacing the previous ones. */
+/** What startup writes: the instance admins and the configured grants, replacing the previous configured ones. */
 export interface AccessSnapshot {
   admins: readonly string[];
   grants: readonly BrainGrant[];
@@ -20,9 +26,12 @@ export interface GrantStore extends GrantReader {
   /** Every brain slug in the `brains` table. */
   brainSlugs(): string[];
   /**
-   * In one transaction: `admins` become the only instance admins and `grants`
-   * the only rows of `grants`. Users are created when missing, never deleted.
+   * `admins` become the only instance admins and `grants` the only
+   * configuration grants (`source = 'config'`); grants created through the
+   * admin API (`source = 'api'`) are kept unless a configured grant names the
+   * same user and brain. Users are created when missing, never deleted.
+   * Callers run it inside `transaction`.
    */
-  replaceAll(snapshot: AccessSnapshot): void;
+  replaceConfigured(snapshot: AccessSnapshot): void;
   transaction<T>(work: () => T): T;
 }
