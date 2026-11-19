@@ -17,7 +17,8 @@ export const ACCOUNT_NAV: readonly NavItem[] = [
 export const ADMIN_NAV: readonly NavItem[] = [
   { path: '/ui/brains', label: 'Brains' },
   { path: '/ui/users', label: 'Users' },
-  { path: '/ui/service-accounts', label: 'Service accounts' }
+  { path: '/ui/service-accounts', label: 'Service accounts' },
+  { path: '/ui/audit', label: 'Audit log' }
 ];
 
 /** What every page shows around its content. */

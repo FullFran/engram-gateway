@@ -31,6 +31,20 @@ export interface AuditFilter {
   toMs?: number;
 }
 
+/** One page of the log, newest first (#17): every field narrows it; `before` continues from an earlier page. */
+export interface AuditQuery {
+  brain?: string;
+  action?: string;
+  /** The acting user's login, any case. */
+  actor?: string;
+  outcome?: AuditOutcome;
+  fromMs?: number;
+  toMs?: number;
+  /** Only rows with a smaller id. */
+  before?: number;
+  limit: number;
+}
+
 /** Reads rows oldest first, lazily, so an export never loads the whole log. */
 export interface AuditReader {
   read(filter?: AuditFilter): Iterable<AuditRecord>;

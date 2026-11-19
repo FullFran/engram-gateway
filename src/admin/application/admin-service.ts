@@ -1,5 +1,5 @@
 import { auditCsvLines } from '../../audit/index.js';
-import type { AuditActor, AuditFilter, AuditMeta, AuditOutcome } from '../../audit/index.js';
+import type { AuditActor, AuditFilter, AuditMeta, AuditOutcome, AuditQuery, AuditRecord } from '../../audit/index.js';
 import { isGitHubLogin, isRole, ROLES } from '../../authz/index.js';
 import { DEFAULT_BRAIN, brainDataDir, parseBrainSlug } from '../../brains/index.js';
 import type { AdminActor } from '../domain/admin-actor.js';
@@ -30,6 +30,20 @@ export interface AdminServiceDeps {
 export type BrainHealthResult =
   | { ok: true; report: BrainHealthReport & { brain: string } }
   | { ok: false; reason: 'no_data' | 'busy'; message: string };
+
+/** An audit page request as a caller sends it; `queryAudit` validates every field. */
+export type AuditQueryRequest = Partial<Omit<AuditQuery, 'outcome'>> & { outcome?: string };
+
+/** A page of the audit log, newest first; `nextBefore` asks for the next (older) page, null on the last. */
+export interface AuditPage {
+  rows: AuditRecord[];
+  nextBefore: number | null;
+}
+
+const AUDIT_OUTCOMES: readonly string[] = ['ok', 'error', 'denied'];
+const AUDIT_ACTION = /^[a-z][a-z0-9_.]{0,63}$/;
+export const AUDIT_PAGE_DEFAULT = 50;
+export const AUDIT_PAGE_MAX = 200;
 
 export interface ExportOptions {
   /** Refuse an export matching more rows than this (the HTTP API sets it; the CLI does not). */
@@ -276,6 +290,36 @@ export class AdminService {
   }
 
   // ---- Audit ----
+
+  /**
+   * A page of the audit log for the panel (#17), newest first. Reading it is
+   * not audited (like the other lists); a refused reader is, as `denied`.
+   */
+  queryAudit(actor: AdminActor, request: AuditQueryRequest): AuditPage {
+    this.authorize(actor, { action: 'audit.list', brain: null, target: null });
+    const { outcome, action, actor: login, limit = AUDIT_PAGE_DEFAULT, before } = request;
+    if (outcome !== undefined && !AUDIT_OUTCOMES.includes(outcome)) throw new AdminError('invalid', `outcome must be one of ${AUDIT_OUTCOMES.join(', ')}`);
+    if (action !== undefined && !AUDIT_ACTION.test(action)) throw new AdminError('invalid', `invalid action ${JSON.stringify(action)}`);
+    if (login !== undefined) requireLogin(login);
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new AdminError('invalid', 'limit must be a positive integer');
+    if (before !== undefined && (!Number.isSafeInteger(before) || before < 1)) throw new AdminError('invalid', 'before must be a positive integer');
+    for (const [name, ms] of [['from', request.fromMs], ['to', request.toMs]] as const) {
+      if (ms !== undefined && !Number.isFinite(ms)) throw new AdminError('invalid', `${name} must be a date`);
+    }
+    const size = Math.min(limit, AUDIT_PAGE_MAX);
+    const query: AuditQuery = { limit: size + 1 };
+    if (request.brain !== undefined) query.brain = request.brain;
+    if (action !== undefined) query.action = action;
+    if (login !== undefined) query.actor = login;
+    if (outcome !== undefined) query.outcome = outcome as AuditOutcome;
+    if (request.fromMs !== undefined) query.fromMs = request.fromMs;
+    if (request.toMs !== undefined) query.toMs = request.toMs;
+    if (before !== undefined) query.before = before;
+    const rows = this.deps.store.queryAudit(query);
+    const more = rows.length > size;
+    const page = more ? rows.slice(0, size) : rows;
+    return { rows: page, nextBefore: more ? page[page.length - 1]!.id : null };
+  }
 
   /** The audit log as CSV lines (header first), streamed; the export itself is audited. */
   exportAudit(actor: AdminActor, filter: AuditFilter = {}, options: ExportOptions = {}): Iterable<string> {

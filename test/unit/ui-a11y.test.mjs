@@ -57,6 +57,9 @@ test('axe: every panel page and state has no violation', async t => {
   await call('/ui/users/ci-bot/grants', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, brain: 'alpha', role: 'writer' } });
   pages['service account, token created'] = await call('/ui/service-accounts/ci-bot/tokens', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, name: 'deploy', brains: 'alpha', scope: 'read', expires: '30' } });
   pages['service account, token refused'] = await call('/ui/service-accounts/ci-bot/tokens', { as: 'boss', method: 'POST', form: { csrf: bossCsrf, name: '', brains: 'alpha', scope: 'read', expires: '30' } });
+  pages['audit log'] = await call('/ui/audit?limit=3', { as: 'boss' });
+  pages['audit log, nothing matches'] = await call('/ui/audit?action=nothing.here', { as: 'boss' });
+  pages['audit log, bad filter'] = await call('/ui/audit?from=yesterday', { as: 'boss' });
   pages['not found'] = await call('/ui/nope', { as: 'dev' });
   pages['form refused'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { name: 'x' } });
   pages['signed out'] = await call('/ui/tokens', { method: 'POST', form: { name: 'x' } });

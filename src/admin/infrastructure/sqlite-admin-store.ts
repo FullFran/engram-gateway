@@ -1,6 +1,6 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 import { SqliteAuditLog, insertAuditEvent } from '../../audit/index.js';
-import type { AuditEvent, AuditFilter, AuditRecord } from '../../audit/index.js';
+import type { AuditEvent, AuditFilter, AuditQuery, AuditRecord } from '../../audit/index.js';
 import { isRole } from '../../authz/index.js';
 import type { Role } from '../../authz/index.js';
 import { SqliteBrainRepository } from '../../brains/index.js';
@@ -145,6 +145,10 @@ export class SqliteAdminStore implements AdminStore {
 
   readAudit(filter: AuditFilter): Iterable<AuditRecord> {
     return this.auditLog.read(filter);
+  }
+
+  queryAudit(query: AuditQuery): AuditRecord[] {
+    return this.auditLog.query(query);
   }
 
   countAudit(filter: AuditFilter, upTo: number): number {
