@@ -46,7 +46,18 @@ export const TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(Object.a
   mem_merge_projects: 'owner'
 } satisfies Record<string, Role>));
 
-/** The minimum role for `tool`; undefined for a tool the table does not know (denied). */
+/**
+ * The minimum role for every tool the gateway serves itself (src/gateway-tools).
+ * Kept apart from TOOL_ROLES, which mirrors engram's own tools exactly.
+ *
+ * - brain_health: owner (instance admins own every brain).
+ */
+export const GATEWAY_TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(Object.assign(Object.create(null) as Record<string, Role>, {
+  brain_health: 'owner'
+} satisfies Record<string, Role>));
+
+/** The minimum role for `tool` (engram's or the gateway's); undefined for a tool neither table knows (denied). */
 export function requiredRole(tool: string): Role | undefined {
+  if (Object.hasOwn(GATEWAY_TOOL_ROLES, tool)) return GATEWAY_TOOL_ROLES[tool];
   return Object.hasOwn(TOOL_ROLES, tool) ? TOOL_ROLES[tool] : undefined;
 }

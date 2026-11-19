@@ -8,7 +8,8 @@
  */
 import type { RequestStage, ToolCaller } from './tool-call-pipeline.js';
 
-export type AccessVerdict = { allowed: true } | { allowed: false; reason: string };
+/** `role`: the caller's effective role on the brain, when access is role-based. */
+export type AccessVerdict = { allowed: true; role?: string } | { allowed: false; reason: string };
 
 export interface ToolAccessCheck {
   check(caller: ToolCaller | undefined, brain: string | null | undefined, tool: string): AccessVerdict;
@@ -36,7 +37,7 @@ export function createAuthorizeStage(access: ToolAccessCheck): RequestStage {
       ctx.meta.denyReason = verdict.reason;
       throw new ToolCallDeniedError(ctx.request.name, verdict.reason);
     }
-    return ctx;
+    return verdict.role !== undefined ? { ...ctx, role: verdict.role } : ctx;
   };
 }
 

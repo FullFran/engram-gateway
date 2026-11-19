@@ -28,6 +28,15 @@ export interface BrainAccess {
   mayOpen(login: string, brain: string): boolean;
 }
 
+/** Admin endpoints (instance admins only when auth is on). */
+export interface AdminApi {
+  isAdmin(login: string): boolean;
+  /** The health report (#18) of brain `slug`; `rawOptions` is the query string. */
+  /** Records an authenticated admin read (the audit log); `login` is null with auth off. */
+  recordAccess?(access: { login: string | null; brain: string; outcome: 'ok' | 'error' | 'denied' }): void;
+  brainHealth(slug: string, rawOptions: unknown): { ok: true; report: unknown } | { ok: false; reason: 'unknown_brain' | 'no_data' | 'invalid_arguments' | 'busy'; message: string };
+}
+
 export interface GatewayAppOptions {
   bindHost: string;
   publicBaseUrl?: string;
@@ -41,8 +50,12 @@ export interface GatewayAppOptions {
   brainAccess?: BrainAccess;
   /** The brains served at `/mcp/<slug>` (`/mcp`: the default brain), with live/idle counts for `/health/brains`. */
   brains: McpBrains & { stats(): { live: number; idle: number } };
+  /** `GET /admin/brains/<slug>/health`; absent: no admin endpoints. */
+  admin?: AdminApi;
   logger: Logger;
 }
+
+const ADMIN_LOOKUP_STATUS = { unknown_brain: [404, 'not_found'], no_data: [404, 'no_data'], invalid_arguments: [400, 'invalid_request'], busy: [503, 'busy'] } as const;
 
 function single(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -128,6 +141,53 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
     authMiddleware: [mcpAuth]
   });
   app.use(MCP_HTTP_PATH, mcpRouter);
+
+  if (options.admin) {
+    const admin = options.admin;
+    // Admin only. With auth on, the caller proves who they are with a bearer
+    // token for the brain's resource (as for /mcp/<slug>) or a session cookie,
+    // then must be an instance admin. With auth off (loopback) it is open, like /mcp.
+    app.get('/admin/brains/:slug/health', async (req, res, next) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const slug = req.params.slug!;
+      let login: string | null = null;
+      const record = (outcome: 'ok' | 'error' | 'denied') => {
+        try {
+          admin.recordAccess?.({ login, brain: slug, outcome });
+        } catch (error) {
+          logger.error('Audit log write failed for an admin read', { path: req.path, reason: (error as Error).message });
+        }
+      };
+      if (auth) {
+        try {
+          await auth.authenticator.prepare(credentialHeaders(req));
+        } catch (error) {
+          return next(error);
+        }
+        const result = auth.authenticator.authenticate(credentialHeaders(req), { resource: audiences(auth.resource, slug, false), acceptSession: true });
+        if (!result.ok) {
+          res.setHeader('WWW-Authenticate', result.challenge);
+          res.status(result.status).json({ error: result.error });
+          return;
+        }
+        login = result.principal.login;
+        if (!admin.isAdmin(login)) {
+          record('denied');
+          logger.warn('Admin request from a non-admin', { path: req.path, login });
+          res.status(403).json({ error: 'forbidden' });
+          return;
+        }
+      }
+      const lookup = admin.brainHealth(slug, req.query);
+      record(lookup.ok ? 'ok' : 'error');
+      if (lookup.ok) {
+        res.status(200).json(lookup.report);
+        return;
+      }
+      const [status, error] = ADMIN_LOOKUP_STATUS[lookup.reason];
+      res.status(status).json({ error });
+    });
+  }
 
   app.use((_req: Request, res: Response) => {
     res.status(404).json({ error: 'not_found' });
