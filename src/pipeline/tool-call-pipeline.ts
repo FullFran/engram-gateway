@@ -1,7 +1,7 @@
 /**
  * The one tool-call pipeline every `tools/call` goes through:
  *
- *   authorize (#6) -> drop host paths -> redact (#9) -> forward to Engram -> audit (#8) -> wrap result (#19)
+ *   authorize (#6) -> drop host paths -> redact (#9) -> forward to Engram -> attribute (#21) -> audit (#8) -> wrap result (#19)
  *
  * Each stage is a plain function so stages compose and can be tested alone.
  * Request stages see (and may replace) the call before it is forwarded; result
@@ -78,6 +78,8 @@ export interface ToolCallPipeline {
   /** Drops host path arguments (`cwd`, `directory`) before anything else reads them. */
   hostPaths: RequestStage;
   redact: RequestStage;
+  /** Records and shows observation authors (#21); runs before audit so its counts reach the audit row. */
+  attribute: ResultStage;
   audit: AuditStage;
   wrap: ResultStage;
   listTools: ToolListStage;
@@ -108,6 +110,7 @@ export function createToolCallPipeline(opts: ToolCallPipelineOptions = {}): Tool
     authorize: opts.authorize ?? (opts.access ? createAuthorizeStage(opts.access) : allowAll),
     hostPaths: opts.hostPaths ?? stripHostPaths,
     redact: opts.redact ?? createRedactStage({ enabled: opts.redactSecrets ?? true }),
+    attribute: opts.attribute ?? passResult,
     audit: opts.audit ?? noAudit,
     wrap: opts.wrap ?? createWrapStage(),
     listTools: opts.listTools ?? (opts.access ? withAccess(opts.access) : listAll)
@@ -154,6 +157,7 @@ export async function runToolCall(pipeline: ToolCallPipeline, request: ToolCallR
     await pipeline.audit(ctx, { ok: false, error }, call);
     throw error;
   }
+  result = await pipeline.attribute(ctx, result);
   await pipeline.audit(ctx, { ok: true, result }, call);
   return pipeline.wrap(ctx, result);
 }

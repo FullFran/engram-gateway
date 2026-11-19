@@ -27,11 +27,11 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
   the legacy `initialize` handshake are served.
 - **Tool-call pipeline.** Every `tools/call` runs through the same stages,
   in order: authorize → drop host paths → redact → forward to Engram →
-  audit → wrap result.
-  Authorize checks the caller's role on the brain (see
+  attribute → audit → wrap result. Authorize checks the caller's role on the brain (see
   [Roles and grants](#roles-and-grants)); a refused call is never forwarded.
-  Audit writes one row per call, refused ones included, to the audit log
-  (see [Audit log](#audit-log)).
+  Attribute records who wrote each observation (see
+  [Author attribution](#author-attribution)). Audit writes one row per call,
+  refused ones included, to the audit log (see [Audit log](#audit-log)).
 - **Secret redaction.** Before a tool call is forwarded, every string
   argument (values and object keys) is scanned for well-known secret shapes
   and each match becomes `[secret removed:<kind>]`: Anthropic, OpenAI,
@@ -265,7 +265,7 @@ Engram release cannot add an unreviewed tool.
 ### Gateway database
 
 Gateway state (OAuth clients, token families, hashed tokens and codes, the
-brains table, users and their grants, the audit log) is one SQLite file
+brains table, users and their grants, the audit log, observation authors) is one SQLite file
 opened with Node's built-in `node:sqlite` (Node 22.13 or later; the image
 ships Node 24), in WAL mode with foreign keys on and a 5 s busy timeout, so
 two gateways can share it during a deploy. The schema is versioned with
@@ -438,6 +438,44 @@ starts with an empty token store: clients sign in again.
 **Not covered.** Snapshots stay on the same volume as the data, so the VPS
 disk is still a single point of failure. Copy `$BACKUP_DIR` off the server
 (the files are already encrypted) if you need off-site backups.
+
+### Author attribution
+
+Engram stores no author, so in a shared brain the gateway records who wrote
+each observation in its own database (`observation_authors`, `src/attribution/`),
+keyed by brain and Engram's observation id.
+
+- **Writes.** After a successful `mem_save`, `mem_session_summary` or
+  `mem_update`, the observation id in Engram's result is recorded with the
+  signed-in login. The first `mem_save` of an observation makes the caller
+  its author; later writes (a `topic_key` revision, `mem_update`) only
+  change the last writer, so "saved by A, last updated by B" is kept.
+- **Reads.** `mem_search` and `mem_get_observation` results get one extra
+  text item, inside the memory-data block like the rest of the result:
+
+  ```text
+  Authors recorded by the gateway (observations not listed have no known author):
+  #12 saved by alice
+  #14 saved by alice, last updated by bob
+  ```
+
+  and the same as a map in `_meta["engram-gateway/authors"]`
+  (`{ "12": { "savedBy": "alice", "lastUpdatedBy": "alice" } }`). Engram's
+  own text is not changed. `mem_context` carries no observation ids, so it
+  is not annotated. Any reader of the brain sees the logins of its writers.
+- **Unknown authors are never guessed.** Observations written before this
+  feature, directly through engram, or with authentication off have no
+  author. A `mem_update` of such an observation records the last writer and
+  shows `author unknown`. Limit: a `topic_key` revision of an observation
+  written before this feature returns the same result as a new save, so its
+  reviser is recorded as its author.
+- **Fail open.** If a write result carries no id (`mem_capture_passive`
+  never does), the call succeeds and the audit row counts
+  `attribution.skipped_no_id`. If the attribution write itself fails, the
+  call still succeeds and the gateway logs `Attribution write failed` with
+  the tool name.
+- **Deletes.** A successful `mem_delete` through the gateway removes the
+  observation's row.
 
 ## Develop
 

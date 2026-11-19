@@ -16,6 +16,7 @@
 import { chmodSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
+import { SqliteAuthorshipRepository, createAttributor } from './attribution/index.js';
 import { SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
 import { GrantAccessPolicy, SqliteGrantRepository, bootstrapAccess, createToolAccess, parseAdminLogins, parseBrainGrants } from './authz/index.js';
@@ -27,7 +28,7 @@ import { createEngramBridge } from './bridge/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
 import { createGatewayApp } from './http/app.js';
-import { createAuditStage, createToolCallPipeline } from './pipeline/index.js';
+import { createAttributionStage, createAuditStage, createToolCallPipeline } from './pipeline/index.js';
 import { openGatewayDatabase } from './shared/gateway-database.js';
 import { createLogger } from './shared/logger.js';
 
@@ -85,6 +86,12 @@ async function main(): Promise<void> {
   const auditLog = new SqliteAuditLog(db);
   const pipeline = createToolCallPipeline({
     ...(auth ? { access: createToolAccess(grants) } : {}),
+    // Attribution (#21): who wrote each observation, in the gateway database;
+    // shown next to mem_search / mem_get_observation results. Needs a signed-in caller.
+    attribute: createAttributionStage({
+      attribute: createAttributor({ authors: new SqliteAuthorshipRepository(db), clock: { nowMs: () => Date.now() } }),
+      onError: (error, tool) => logger.error('Attribution write failed; the tool call went through unattributed', { tool, reason: (error as Error).message })
+    }),
     audit: createAuditStage({
       record: toolCallRecorder(auditLog, { nowMs: () => Date.now() }),
       onError: (error, tool) => logger.error('Audit log write failed; the tool call went through unrecorded', { tool, reason: (error as Error).message })
