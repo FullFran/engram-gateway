@@ -27,8 +27,8 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
   the legacy `initialize` handshake are served.
 - **Tool-call pipeline.** Every `tools/call` runs through the same stages,
   in order: authorize → redact → forward to Engram → audit → wrap result.
-  Authorize and audit are pass-through placeholders for now (roles and
-  grants, audit log).
+  Authorize is a pass-through placeholder for now (roles and grants); audit
+  writes one row per call to the audit log (see [Audit log](#audit-log)).
 - **Secret redaction.** Before a tool call is forwarded, every string
   argument (values and object keys) is scanned for well-known secret shapes
   and each match becomes `[secret removed:<kind>]`: Anthropic, OpenAI,
@@ -213,6 +213,46 @@ once you are happy). Issued tokens keep working. The import runs once; a
 database that already holds auth state is never overwritten. Stop the old
 gateway before starting the new one for this upgrade: tokens an old gateway
 issues after the import are not carried over (clients just sign in again).
+
+### Audit log
+
+The gateway database holds an append-only `audit_log` table (`src/audit/`):
+one row per tool call (and, later, per admin action) with when, who, which
+brain, the action and its target (the tool name), the outcome (`ok`, `error`
+or `denied`) and the duration. It never stores memory content, argument
+values, error messages or secrets: `meta_json` keeps counts and ids only
+(for example redaction counts per kind, the observation id, the OAuth client
+id, and a fixed `errorKind` such as `forward_failed`).
+
+- **Append-only in the database.** `BEFORE UPDATE` and `BEFORE DELETE`
+  triggers abort with `audit_log is append-only`.
+- **Opaque actors.** A user is stored by `users.id`; the GitHub login lives in
+  `users` and is joined in when reading. Append-only conflicts with "erase
+  everything about user X": anonymise a user by editing `users`, not the log.
+- **Brain.** `brain_id` is the slug of the brain the call was routed to
+  (`/mcp/<slug>`; `/mcp` is `default`), an opaque text key, empty when an
+  action is not tied to a brain.
+- **Consistency.** A tool call cannot share a transaction with the brain's
+  own `engram.db`, so its row is written after the forward, with the outcome.
+  A crash between the forward and that write loses the row; this is accepted
+  rather than a two-phase write. Admin mutations write their row in the same
+  transaction (`insertAuditEvent`).
+- **Every call, including failures.** The audit stage runs after the
+  forward for every call that reaches it: `ok`, `error` with `errorKind`
+  `tool_error` (the tool answered `isError`) or `forward_failed` (the forward
+  threw; the original error still reaches the client). The caller is the
+  signed-in GitHub login and OAuth client id from the access token.
+- **Auth off.** Without authentication calls are still recorded, with the
+  system actor `anonymous` (and only in memory when `GATEWAY_DATA_DIR` is
+  unset, like the rest of the gateway state).
+- **A failed audit write does not fail the call.** The forward already
+  happened, so failing the call would only invite a retry that repeats it;
+  the gateway logs `Audit log write failed` with the tool name instead.
+- **CSV export.** `auditCsvLines(log.read({ brain, fromMs, toMs }))` streams
+  the log oldest first (read in pages, never all at once) as RFC 4180 CSV.
+  Cells that start with `=`, `+`, `-`, `@`, tab or CR get a `'` prefix so a
+  spreadsheet does not run them as formulas. The admin-only HTTP endpoint
+  comes with roles.
 
 ## Develop
 

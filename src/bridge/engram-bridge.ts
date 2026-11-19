@@ -4,7 +4,7 @@ import { Server } from '@modelcontextprotocol/server';
 import type { McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
 import { createToolCallPipeline, runToolCall } from '../pipeline/index.js';
-import type { ToolCallPipeline, ToolCallResult } from '../pipeline/index.js';
+import type { ToolCaller, ToolCallPipeline, ToolCallResult } from '../pipeline/index.js';
 
 export interface EngramBridgeOptions {
   /** Executable to spawn, normally `engram`. */
@@ -52,6 +52,13 @@ const COOLDOWN_BASE_MS = 1000;
 const COOLDOWN_MAX_MS = 30_000;
 /** A child that ran this long before exiting was healthy: its exit starts the backoff afresh. */
 const STABLE_UPTIME_MS = 60_000;
+
+/** The caller of one HTTP request, from the validated token's auth info (login in `extra.login`). */
+function callerOf(authInfo: { clientId?: string; extra?: Record<string, unknown> } | undefined): ToolCaller | undefined {
+  if (!authInfo) return undefined;
+  const login = authInfo.extra?.login;
+  return { ...(typeof login === 'string' ? { login } : {}), ...(authInfo.clientId ? { clientId: authInfo.clientId } : {}) };
+}
 
 export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
   const { logger } = opts;
@@ -123,7 +130,8 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
     return connecting;
   }
 
-  const factory: McpServerFactory = async () => {
+  const factory: McpServerFactory = async context => {
+    const caller = callerOf(context?.authInfo);
     const client = await upstream();
     const version = client.getServerVersion()?.version ?? FALLBACK_VERSION;
     const instructions = client.getInstructions();
@@ -135,8 +143,8 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
     server.setRequestHandler('tools/call', async request => {
       const { name, arguments: args } = request.params;
       const result = await runToolCall(pipeline, { name, ...(args !== undefined ? { arguments: args } : {}) }, async call =>
-        (await (await upstream()).callTool(call)) as ToolCallResult
-      );
+        (await (await upstream()).callTool(call)) as ToolCallResult,
+      { ...(caller ? { caller } : {}), ...(opts.brain !== undefined ? { brain: opts.brain } : {}) });
       return result as Awaited<ReturnType<Client['callTool']>>;
     });
     return server;

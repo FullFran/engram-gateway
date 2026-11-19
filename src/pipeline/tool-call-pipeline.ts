@@ -34,14 +34,33 @@ export interface ToolCallContext {
   meta: Record<string, unknown>;
 }
 
+/** Who made the call, from the validated access token; absent when auth is off. */
+export interface ToolCaller {
+  login?: string;
+  clientId?: string;
+}
+
+/** Facts about one call that are not part of the request: who, which brain, when it started. */
+export interface ToolCallInfo {
+  caller?: ToolCaller;
+  /** Opaque brain key (the slug the call was routed to); null when not tied to a brain. */
+  brain: string | null;
+  startedAtMs: number;
+}
+
+/** How the forward ended: a result (which may be a tool error) or a thrown error. */
+export type ToolCallOutcome = { ok: true; result: ToolCallResult } | { ok: false; error: unknown };
+
 export type RequestStage = (ctx: ToolCallContext) => ToolCallContext | Promise<ToolCallContext>;
 export type ResultStage = (ctx: ToolCallContext, result: ToolCallResult) => ToolCallResult | Promise<ToolCallResult>;
+/** Records the call; it sees the outcome but never changes the result. */
+export type AuditStage = (ctx: ToolCallContext, outcome: ToolCallOutcome, call: ToolCallInfo) => void | Promise<void>;
 export type Forward = (request: ToolCallRequest) => Promise<ToolCallResult>;
 
 export interface ToolCallPipeline {
   authorize: RequestStage;
   redact: RequestStage;
-  audit: ResultStage;
+  audit: AuditStage;
   wrap: ResultStage;
 }
 
@@ -52,8 +71,8 @@ export interface ToolCallPipelineOptions extends Partial<ToolCallPipeline> {
 
 /** Placeholder until #6 adds roles and grants: every call is allowed. */
 export const allowAll: RequestStage = ctx => ctx;
-/** Placeholder until #8 adds the append-only audit log. */
-export const noAudit: ResultStage = (_ctx, result) => result;
+/** No audit log (tests, or a gateway without a database). */
+export const noAudit: AuditStage = () => {};
 /** Identity result stage (e.g. to turn wrapping off in tests). */
 export const passResult: ResultStage = (_ctx, result) => result;
 
@@ -66,12 +85,34 @@ export function createToolCallPipeline(opts: ToolCallPipelineOptions = {}): Tool
   };
 }
 
-/** Runs one call through the stages in the fixed order. */
-export async function runToolCall(pipeline: ToolCallPipeline, request: ToolCallRequest, forward: Forward): Promise<ToolCallResult> {
+export interface RunToolCallOptions {
+  caller?: ToolCaller;
+  brain?: string | null;
+  /** Clock for the call's start time; defaults to `Date.now`. */
+  nowMs?: () => number;
+}
+
+/**
+ * Runs one call through the stages in the fixed order. Audit runs for every
+ * call that reaches the forward step, also when the forward throws; then the
+ * original error is rethrown.
+ */
+export async function runToolCall(pipeline: ToolCallPipeline, request: ToolCallRequest, forward: Forward, opts: RunToolCallOptions = {}): Promise<ToolCallResult> {
   let ctx: ToolCallContext = { request, meta: {} };
   ctx = await pipeline.authorize(ctx);
   ctx = await pipeline.redact(ctx);
-  const result = await forward(ctx.request);
-  const audited = await pipeline.audit(ctx, result);
-  return pipeline.wrap(ctx, audited);
+  const call: ToolCallInfo = {
+    ...(opts.caller ? { caller: opts.caller } : {}),
+    brain: opts.brain ?? null,
+    startedAtMs: (opts.nowMs ?? Date.now)()
+  };
+  let result: ToolCallResult;
+  try {
+    result = await forward(ctx.request);
+  } catch (error) {
+    await pipeline.audit(ctx, { ok: false, error }, call);
+    throw error;
+  }
+  await pipeline.audit(ctx, { ok: true, result }, call);
+  return pipeline.wrap(ctx, result);
 }
