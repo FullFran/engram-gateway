@@ -4,7 +4,7 @@
 // accepts admin browser sessions only.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,14 +21,14 @@ const quiet = Object.fromEntries(['debug', 'info', 'warn', 'error'].map(level =>
 const ADMIN = { kind: 'user', login: 'FullFran' };
 const ALICE = { kind: 'user', login: 'alice' };
 
-/** Scratch gateway state outside the worktree, kept for inspection (paths printed with --test-reporter=spec). */
+/** Scratch gateway state outside the worktree, removed when the test ends. */
 function scratch(t, seed = ['default', 'team']) {
   const dir = mkdtempSync(join(tmpdir(), 'engram-gateway-admin-'));
   const root = join(dir, 'brains');
   mkdirSync(root);
   const dbPath = join(dir, 'gateway.db');
   const db = openGatewayDatabase(dbPath);
-  t.after(() => { try { db.close(); } catch {} });
+  t.after(() => { try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
   const brains = new SqliteBrainRepository(db);
   for (const slug of seed) brains.ensure(slug, join(root, slug));
   const grants = new SqliteGrantRepository(db);

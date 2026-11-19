@@ -888,6 +888,12 @@ ENGRAM_BIN=$(command -v engram) npm test   # plus e2e against a real engram
 The e2e scripts run Engram in throwaway `HOME` and data directories and strip
 every `ENGRAM_CLOUD_*` variable, so they never sync to your Engram Cloud.
 
+Tests leave nothing behind: `npm run test:unit` runs the suite with `TMPDIR`
+set to a fresh directory and fails if anything is left in it, and each e2e
+script removes its scratch directory on success (on failure it is kept and
+its path printed). A test that creates a temporary directory removes it with
+`t.after(() => rmSync(dir, { recursive: true, force: true }))`.
+
 ### Recall evaluation
 
 `eval/` replays the `mem_search` queries agents issued (from Claude Code

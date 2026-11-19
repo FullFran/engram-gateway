@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { openGatewayDatabase } from '../../dist/shared/gateway-database.js';
 import {
   BrainCapacityError, BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, brainDataDir, buildChildEnv,
@@ -13,6 +13,7 @@ import { createEngramBridge } from '../../dist/bridge/index.js';
 
 const scratchRoot = mkdtempSync(join(tmpdir(), 'brains-test-'));
 const scratch = name => mkdtempSync(join(scratchRoot, `${name}-`));
+after(() => rmSync(scratchRoot, { recursive: true, force: true }));
 const quiet = Object.fromEntries(['debug', 'info', 'warn', 'error'].map(l => [l, () => {}]));
 
 // ---- slug ----
