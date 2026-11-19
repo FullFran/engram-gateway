@@ -90,7 +90,7 @@ const rowCount = (db, table) => Number(db.prepare(`SELECT count(*) AS n FROM ${t
 
 test('migration 7 adds connections and connection_brains, and a connection id column on codes and tokens', t => {
   const w = world(t);
-  assert.equal(GATEWAY_SCHEMA_VERSION, 7);
+  assert.ok(GATEWAY_SCHEMA_VERSION >= 7);
   for (const table of ['connections', 'connection_brains']) assert.equal(rowCount(w.db, table), 0, table);
   for (const table of ['auth_codes', 'access_tokens', 'refresh_tokens']) {
     const columns = w.db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);

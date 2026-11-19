@@ -8,6 +8,7 @@
  *   backup decrypt <file> <out>    decrypt one snapshot file (manual recovery, e.g. the gateway database)
  *   restore <brain> <snapshot>     replace a brain's databases with a snapshot
  *   admin brains|users|grants|audit ...   manage brains, users and grants, export the audit log (#10);
+ *                                  admin tokens ...: personal access tokens of any user (#7);
  *                                  run `node dist/cli.js admin` for the full list
  *
  * When a gateway with backups enabled is running, `backup now|list` and

@@ -52,12 +52,13 @@ export class SqliteConnectionStore implements ConnectionStore {
     });
   }
 
-  createToken(login: string, choice: ConnectionChoice): number {
+  createToken(login: string, choice: ConnectionChoice, alongside?: (connectionId: number) => void): number {
     return immediateTransaction(this.db, () => {
       const userId = this.userId(login);
       this.ensureNameFree(userId, choice.name);
       const connectionId = Number(this.db.prepare("INSERT INTO connections (user_id, name, kind) VALUES (?, ?, 'token')").run(userId, choice.name).lastInsertRowid);
       this.writeBrains(connectionId, choice);
+      alongside?.(connectionId);
       return connectionId;
     });
   }

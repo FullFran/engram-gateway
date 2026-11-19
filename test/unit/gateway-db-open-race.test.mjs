@@ -21,16 +21,24 @@ const script = `
   const { openGatewayDatabase } = await import(${JSON.stringify(MODULE)});
   const [path, startAt] = process.argv.slice(1);
   while (Date.now() < Number(startAt)) { /* release every process at once */ }
-  const db = openGatewayDatabase(path);
-  db.prepare('INSERT INTO users (github_login) VALUES (?)').run('u' + process.pid);
-  db.close();`;
+  let stage = 'open';
+  try {
+    const db = openGatewayDatabase(path);
+    stage = 'insert';
+    db.prepare('INSERT INTO users (github_login) VALUES (?)').run('u' + process.pid);
+    db.close();
+  } catch (e) {
+    // Name the step that failed, so a rare failure on a loaded machine can be told apart (#33).
+    console.error('Error at ' + stage + ' (errcode ' + e.errcode + '): ' + String(e.stack).split('\\n').slice(0, 6).join(' | '));
+    process.exit(1);
+  }`;
 
 function opener(path, startAt) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, ['--no-warnings', '--input-type=module', '-e', script, path, String(startAt)], { stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
     child.stderr.on('data', d => { err += d; });
-    child.on('exit', code => resolve(code === 0 ? null : `exit ${code}: ${err.split('\n').find(line => /Error/.test(line)) ?? err.slice(0, 200)}`));
+    child.on('exit', code => resolve(code === 0 ? null : `exit ${code}: ${err.split('\n').find(line => /^Error at /.test(line)) ?? err.slice(0, 200)}`));
   });
 }
 

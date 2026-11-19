@@ -29,7 +29,9 @@ import {
 } from './backup/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createConnectionServer, createEngramBridge } from './bridge/index.js';
-import { ConnectionAdmin, ConnectionConsentService, SqliteConnectionStore } from './connections/index.js';
+import {
+  ConnectionAdmin, ConnectionConsentService, PersonalAccessTokens, SqliteConnectionStore, SqlitePatStore, createAccountRouter, nodePatSecrets, patIdentityProvider
+} from './connections/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
 import { BRAIN_RESOLVE_TOOL, createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet } from './gateway-tools/index.js';
 import { createEngramBrainHealthService } from './health/index.js';
@@ -87,18 +89,25 @@ async function main(): Promise<void> {
   // Connections (#27): a grant on the bare `/mcp` resource makes a connection
   // with its own brains and roles, capped by the owner's grants.
   const connections = new SqliteConnectionStore(db);
+  // Personal access tokens (#7): token connections with a hashed secret,
+  // used as a Bearer on /mcp; managed from /account/api and the admin CLI.
+  const auditLog = new SqliteAuditLog(db);
+  const pats = new PersonalAccessTokens({
+    store: new SqlitePatStore(db, connections), grants, secrets: nodePatSecrets, clock: { nowMs: () => Date.now() }, audit: auditLog,
+    onAuditError: error => logger.error('Audit log write failed for a refused personal access token', { reason: (error as Error).message })
+  });
   const auth = authConfig.mode === 'oauth'
     ? buildAuth(authConfig, {
       logger, db,
       policy: new GrantAccessPolicy(grants, authConfig.settings.resources),
-      connections: new ConnectionConsentService(grants, connections, authConfig.settings.resources[0]!, DEFAULT_BRAIN)
+      connections: new ConnectionConsentService(grants, connections, authConfig.settings.resources[0]!, DEFAULT_BRAIN),
+      extraProviders: [patIdentityProvider(pats)]
     })
     : undefined;
   await auth?.warmUp();
 
   // Audit log (#8): every tool call gets one row in the gateway database,
   // with the brain it was routed to; without auth the actor is `anonymous`.
-  const auditLog = new SqliteAuditLog(db);
   const pipeline = createToolCallPipeline({
     ...(auth ? { access: createToolAccess(grants, connections) } : {}),
     // Attribution (#21): who wrote each observation, in the gateway database;
@@ -198,7 +207,11 @@ async function main(): Promise<void> {
     trustProxy: config.trustProxy,
     ...(auth ? {
       auth: { router: auth.router, authenticator: auth.authenticator, resource: auth.settings.resources[0]! },
-      brainAccess: { mayOpen: (login: string, brain: string) => grants.roleOf(login, brain) !== undefined },
+      // A connection (or PAT) on /mcp/<slug> also needs the brain among its own.
+      brainAccess: {
+        mayOpen: (login: string, brain: string, connectionId?: number) =>
+          grants.roleOf(login, brain) !== undefined && (connectionId === undefined || typeof connections.roleOn(connectionId, brain) === 'string')
+      },
       // Connection tokens on /mcp (#27): the brain is chosen per call.
       connectionServer: createConnectionServer({
         brains: registry, connections, pipeline, gatewayTools, logger,
@@ -233,6 +246,7 @@ async function main(): Promise<void> {
       identify,
       logger
     }),
+    accountApi: identify => createAccountRouter({ tokens: pats, identify, clock: { nowMs: () => Date.now() } }),
     logger
   });
   const server = createServer(app);

@@ -6,6 +6,7 @@ import type { Logger } from '../shared/logger.js';
 import type { HttpRequestAuthenticator } from '../auth/index.js';
 import { ADMIN_API_PATH } from '../admin/index.js';
 import type { AdminIdentify } from '../admin/index.js';
+import { PAT_PROVIDER } from '../connections/index.js';
 import { MCP_AUTH_INFO_LOCAL, MCP_BRAIN_LOCAL, MCP_CONNECTION_LOCAL, MCP_DEFAULT_BRAIN, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
 import type { McpBrains, McpServerFactory } from './mcp-route.js';
 
@@ -26,9 +27,15 @@ export interface GatewayAuth {
 
 /** Per-brain access for the MCP endpoint (#6): read on every request, never cached. */
 export interface BrainAccess {
-  /** Does `login` hold any role on brain `brain`? */
-  mayOpen(login: string, brain: string): boolean;
+  /**
+   * Does `login` hold any role on brain `brain`, and, for a request through
+   * a connection (#27; a PAT is one, #7), is the brain one of its brains?
+   */
+  mayOpen(login: string, brain: string, connectionId?: number): boolean;
 }
+
+/** Where the signed-in user's own API (personal access tokens, #7) is mounted. */
+export const ACCOUNT_API_PATH = '/account/api';
 
 /** Admin endpoints (instance admins only when auth is on). */
 export interface AdminApi {
@@ -58,6 +65,12 @@ export interface GatewayAppOptions {
    * open on loopback with auth off).
    */
   adminApi?: (identify: AdminIdentify) => express.Router;
+  /**
+   * Builds the signed-in user's own API (#7: personal access tokens) from
+   * the request's identity, browser session only, like the admin API.
+   * Mounted at `/account/api` when auth is on.
+   */
+  accountApi?: (identify: AdminIdentify) => express.Router;
   /** The brains served at `/mcp/<slug>` (`/mcp`: the default brain), with live/idle counts for `/health/brains`. */
   brains: McpBrains & { stats(): { live: number; idle: number } };
   /** `GET /admin/brains/<slug>/health`; absent: no admin endpoints. */
@@ -108,17 +121,16 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
 
   if (auth) app.use(auth.router);
 
-  if (auth && options.adminApi) {
-    // Session cookie only: the Authorization header is dropped, so an MCP
-    // access token (audience `/mcp...`) can never act on the admin API.
-    const identify: AdminIdentify = async req => {
-      const headers = { authorization: undefined, cookie: single(req.headers.cookie) };
-      await auth.authenticator.prepare(headers);
-      const result = auth.authenticator.authenticate(headers, { resource: auth.resource, acceptSession: true });
-      return result.ok ? result.principal.login : undefined;
-    };
-    app.use(ADMIN_API_PATH, options.adminApi(identify));
-  }
+  // Session cookie only: the Authorization header is dropped, so an MCP
+  // access token or a PAT can never act on the admin or account API.
+  const identify: AdminIdentify = async req => {
+    const headers = { authorization: undefined, cookie: single(req.headers.cookie) };
+    await auth!.authenticator.prepare(headers);
+    const result = auth!.authenticator.authenticate(headers, { resource: auth!.resource, acceptSession: true });
+    return result.ok ? result.principal.login : undefined;
+  };
+  if (auth && options.adminApi) app.use(ADMIN_API_PATH, options.adminApi(identify));
+  if (auth && options.accountApi) app.use(ACCOUNT_API_PATH, options.accountApi(identify));
 
   /** Audiences a token may carry for this request's brain; the first is the canonical one. */
   const audiences = (base: string, slug: string, bare: boolean): string[] => {
@@ -147,8 +159,9 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
     // call checks the grant and the connection's role on its brain.
     const connectionMode = principal.connectionId !== undefined && req.path === '/' && options.connectionServer !== undefined;
     if (connectionMode) res.locals[MCP_CONNECTION_LOCAL] = true;
-    // The token proves who this is; the grant, read now, says whether this brain is theirs.
-    else if (!options.brainAccess!.mayOpen(principal.login, slug)) {
+    // The token proves who this is; the grant (and the connection's brains),
+    // read now, say whether this brain is theirs.
+    else if (!options.brainAccess!.mayOpen(principal.login, slug, principal.connectionId)) {
       logger.warn('MCP request without a grant on the brain', { brain: slug, login: principal.login });
       res.status(403).json({ error: 'forbidden' });
       return;
@@ -208,7 +221,8 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
           return;
         }
         login = result.principal.login;
-        if (!admin.isAdmin(login)) {
+        // A PAT (#7) is a credential for the MCP endpoint only, whoever owns it.
+        if (!admin.isAdmin(login) || result.principal.provider === PAT_PROVIDER) {
           record('denied');
           logger.warn('Admin request from a non-admin', { path: req.path, login });
           res.status(403).json({ error: 'forbidden' });

@@ -5,6 +5,9 @@ import { AdminError, AdminService, CLI_ACTOR, SqliteAdminStore, fsBrainDirectori
 import type { AuditFilter } from '../audit/index.js';
 import { resolveBrainsConfig } from '../brains/index.js';
 import { resolveGatewayDbPath } from '../config.js';
+import { PatError, PersonalAccessTokens, SqliteConnectionStore, SqlitePatStore, nodePatSecrets, patJson } from '../connections/index.js';
+import { SqliteAuditLog } from '../audit/index.js';
+import { SqliteGrantRepository } from '../authz/index.js';
 import { openGatewayDatabase } from '../shared/gateway-database.js';
 
 export const ADMIN_USAGE = `usage:
@@ -18,7 +21,10 @@ export const ADMIN_USAGE = `usage:
   node dist/cli.js admin grants list [--brain <slug>] [--login <github-login>]
   node dist/cli.js admin grants set <github-login> <brain> <reader|writer|owner>
   node dist/cli.js admin grants revoke <github-login> <brain>
-  node dist/cli.js admin audit export [--brain <slug>] [--from <date>] [--to <date>] [--out <file>]`;
+  node dist/cli.js admin audit export [--brain <slug>] [--from <date>] [--to <date>] [--out <file>]
+  node dist/cli.js admin tokens list <login>
+  node dist/cli.js admin tokens create <login> --name <name> --brains <slug>[,<slug>...] --scope <read|read+write> --expires <30|90|365>
+  node dist/cli.js admin tokens revoke <login> <token-id>`;
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -67,7 +73,8 @@ const COMMANDS: Record<string, Record<string, number>> = {
   brains: { list: 0, create: 1, archive: 1 },
   users: { list: 0, invite: 1, disable: 1, enable: 1 },
   grants: { list: 0, set: 3, revoke: 2 },
-  audit: { export: 0 }
+  audit: { export: 0 },
+  tokens: { list: 1, create: 1, revoke: 2 }
 };
 
 /**
@@ -104,6 +111,10 @@ export async function runAdminCli(argv: readonly string[], env: Env, io: CliIo):
       clock: { nowMs: () => Date.now() }
     });
     const actor = CLI_ACTOR;
+    const pats = () => new PersonalAccessTokens({
+      store: new SqlitePatStore(db!, new SqliteConnectionStore(db!)), grants: new SqliteGrantRepository(db!), secrets: nodePatSecrets,
+      clock: { nowMs: () => Date.now() }, audit: new SqliteAuditLog(db!)
+    });
     switch (`${group} ${command}`) {
       case 'brains list':
         for (const brain of service.listBrains(actor)) io.print(`${brain.slug}\t${brain.status}\t${brain.cloudSync ? 'cloud-sync' : '-'}\t${brain.dataDir}`);
@@ -168,9 +179,37 @@ export async function runAdminCli(argv: readonly string[], env: Env, io: CliIo):
         await once(file, 'finish');
         break;
       }
+      case 'tokens list': {
+        const nowS = Math.floor(Date.now() / 1000);
+        for (const pat of pats().list(args[0]!)) {
+          const view = patJson(pat, nowS);
+          io.print(`${view.id}\t${view.name}\t${view.brains.join(',')}\t${view.scope}\t${view.status}\t${view.createdAt}\t${view.expiresAt}\t${view.lastUsedAt ?? '-'}`);
+        }
+        break;
+      }
+      case 'tokens create': {
+        const expires = options.get('expires');
+        const created = pats().create(actor, args[0]!, {
+          name: options.get('name'), brains: (options.get('brains') ?? '').split(',').filter(Boolean), scope: options.get('scope'),
+          expiresInDays: expires !== undefined && /^\d+$/.test(expires) ? Number(expires) : expires
+        });
+        io.print(`created token ${created.pat.id} (${created.pat.name}) for ${args[0]}, expires ${patJson(created.pat, 0).expiresAt}; shown once, store it now:`);
+        io.print(created.token);
+        break;
+      }
+      case 'tokens revoke': {
+        if (!/^\d{1,15}$/.test(args[1]!)) throw new PatError('not_found', `no token ${JSON.stringify(args[1])}`);
+        const pat = pats().revoke(actor, args[0]!, Number(args[1]));
+        io.print(`revoked token ${pat.id} of ${args[0]}; its name is now ${JSON.stringify(pat.name)}`);
+        break;
+      }
     }
     return 0;
   } catch (error) {
+    if (error instanceof PatError) {
+      io.error(`error: ${error.message}`);
+      return 1;
+    }
     if (!(error instanceof AdminError)) throw error;
     io.error(`error: ${error.message}`);
     return 1;

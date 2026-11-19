@@ -56,6 +56,8 @@ const PATTERNS: readonly SecretPattern[] = [
   { kind: 'slack', regex: new RegExp(`${START}xox[bpars]-[A-Za-z0-9-]{10,255}`, 'g') },
   { kind: 'google', regex: new RegExp(`${START}AIza[A-Za-z0-9_-]{35}`, 'g') },
   { kind: 'npm', regex: new RegExp(`${START}npm_[A-Za-z0-9]{36}`, 'g') },
+  // This gateway's own personal access tokens (#7): `egw_pat_` + 32 bytes in base64url.
+  { kind: 'engram-gateway', regex: new RegExp(`${START}egw_pat_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])`, 'g') },
   { kind: 'jwt', regex: new RegExp(`${START}eyJ[A-Za-z0-9_-]{1,8192}\\.eyJ[A-Za-z0-9_-]{1,8192}\\.[A-Za-z0-9_-]{0,8192}`, 'g') },
   // AWS secret access key: exactly 40 base64 characters with upper, lower and
   // digits (git SHAs are lowercase hex and survive).

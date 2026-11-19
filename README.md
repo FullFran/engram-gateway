@@ -36,7 +36,7 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
   argument (values and object keys) is scanned for well-known secret shapes
   and each match becomes `[secret removed:<kind>]`: Anthropic, OpenAI,
   GitHub, AWS access and secret keys, Stripe, Slack, Google API keys, npm
-  tokens, JWTs, PEM private keys (also without an `END` line), `Bearer`
+  tokens, this gateway's own personal access tokens (`egw_pat_`), JWTs, PEM private keys (also without an `END` line), `Bearer`
   tokens, passwords in URLs, and `.env`-style assignments such as
   `API_KEY=...` or `password: ...`. Invisible characters (zero-width spaces
   and the like) are ignored when matching. This is default deny: every tool
@@ -333,8 +333,8 @@ applies to the next request.
   connection of the first and the last write
   (`observation_authors.connection_id`, `last_connection_id`).
 - **Kinds.** `oauth` connections are made on the consent page, one per user
-  and OAuth client. `token` connections (code projects, CI) get their
-  issuance with personal access tokens (#7).
+  and OAuth client. `token` connections (code projects, CI) are personal
+  access tokens (see below).
 - **Connection tools.** On `/mcp` the client also gets tools that act on
   its own connection (they take no routing `brain`):
   - `brain_list`: the connection's brains the owner still holds a grant on,
@@ -369,6 +369,57 @@ applies to the next request.
   lower it: give a chat client `writer` or `reader` on every brain to keep
   its brains fixed, and change them from the consent page (sign in again)
   instead. Attach and detach are in the audit log.
+
+### Personal access tokens
+
+Headless clients (CI, containers, cron) cannot sign in through the device
+flow. A personal access token (PAT) is a `token` connection with a secret
+they send as `Authorization: Bearer egw_pat_...` on `/mcp` (the brain is
+chosen per call, as for any connection) or on `/mcp/<brain>` for one of its
+brains.
+
+- **Create.** A signed-in user picks a name, one or more brains they hold a
+  grant on, a scope (`read` gives the connection `reader` on each brain,
+  `read+write` gives `writer`, refused on a brain where the user is only
+  `reader`) and an expiry of 30, 90 or 365 days. The first brain is the
+  default one. The secret (`egw_pat_` + 256 random bits) is shown once;
+  the gateway keeps its SHA-256 only (`personal_access_tokens.hash`). Names
+  are unique per user, across all their connections. Revoking a token
+  renames it `<name> (revoked <id>)`, and creating a token with the name of
+  an expired one renames that one `<name> (expired <id>)`, so the name can
+  be reused.
+- **Effective role.** The weaker of the owner's grant (read on every call)
+  and the token's role: a `read` PAT of a writer cannot write. Revoking the
+  owner's grant, or disabling the owner, blocks the token on the next
+  request (a disabled owner's token gets 401). A token is fixed once issued:
+  `connection_attach` and `connection_detach` refuse it.
+- **Refused tokens.** Expired, revoked or unknown tokens, and tokens of a
+  disabled user, get 401 with the standard `WWW-Authenticate` challenge
+  (`error="invalid_token"`). On `/mcp/<brain>` a brain outside the token is
+  403. A PAT is accepted on the MCP endpoint only: never on the admin API,
+  the account API or the brain health endpoint.
+- **Last used.** `last_used_at` is updated on a successful use, at most once
+  a minute per token.
+- **Audit.** `pat.create` and `pat.revoke` (meta `patId`; create also
+  `brains`, `expiresInDays`, `write`) by the owner or the system actor `cli`,
+  and `pat.use` with outcome `denied` and `errorKind` `expired`, `revoked`
+  or `owner_disabled` (at most once a minute per token). The target is
+  `pat-<id>`; no row holds the name or any token material. Calls made with a
+  PAT are audited like any tool call, with client id `pat:<id>` and the
+  connection id.
+
+The signed-in user's own API, at `/account/api`, follows the admin API's
+rules: browser session only (a bearer token is never accepted), cross-site
+requests refused, and mutations need `Content-Type: application/json`.
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| `GET` | `/account/api/tokens` | | `{ tokens: [{ id, name, brains, scope, status, createdAt, expiresAt, lastUsedAt, revokedAt }] }`, newest first |
+| `POST` | `/account/api/tokens` | `{ name, brains: [slug], scope: "read" \| "read+write", expiresInDays: 30 \| 90 \| 365 }` | 201, the same fields plus `token` (the only time it is shown) |
+| `DELETE` | `/account/api/tokens/<id>` | | the token, `status: "revoked"`; 404 when it is not yours, 409 when already revoked |
+
+Errors are `{ error, message }`: 400 `invalid`, 404 `not_found`, 409
+`conflict`. Operators manage anyone's tokens with the CLI (see below).
 
 ### Gateway database
 
@@ -463,6 +514,9 @@ docker exec <container> node dist/cli.js admin grants list [--brain <slug>] [--l
 docker exec <container> node dist/cli.js admin grants set <github-login> <brain> <reader|writer|owner>
 docker exec <container> node dist/cli.js admin grants revoke <github-login> <brain>
 docker exec <container> node dist/cli.js admin audit export [--brain <slug>] [--from <date>] [--to <date>] [--out <file>]
+docker exec <container> node dist/cli.js admin tokens list <login>
+docker exec <container> node dist/cli.js admin tokens create <login> --name <name> --brains <slug>[,<slug>...] --scope <read|read+write> --expires <30|90|365>
+docker exec <container> node dist/cli.js admin tokens revoke <login> <token-id>
 ```
 
 Exit codes: `0` done, `1` refused (the reason on stderr), `2` usage. Dates
