@@ -2,7 +2,7 @@
  * Gateway tools: MCP tools the gateway serves itself (brain_health, later
  * brain_list, brain_resolve, connection_*), next to the tools of the brain's
  * `engram mcp` child. They are listed with engram's tools and run through the
- * same tool-call pipeline (authorize -> redact -> handler -> audit -> wrap);
+ * same tool-call pipeline (authorize -> drop host paths -> redact -> handler -> audit -> wrap);
  * only the forward step differs. Each needs a role in GATEWAY_TOOL_ROLES
  * (src/authz), or it is denied like any unknown tool.
  */

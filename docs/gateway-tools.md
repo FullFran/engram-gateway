@@ -11,7 +11,7 @@ connection tools (#12, #27) build on the same mechanism.
   so the list matches where calls go. The list is then filtered by the
   caller's role, as before.
 - **tools/call:** the bridge runs the one tool-call pipeline
-  (authorize -> redact -> forward -> audit -> wrap). For a gateway tool the
+  (authorize -> drop host paths -> redact -> forward -> audit -> wrap). For a gateway tool the
   forward step calls the tool's handler instead of engram; every other stage
   is unchanged, so gateway tools are authorized, audited and wrapped as data
   like engram's.

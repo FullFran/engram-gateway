@@ -1,5 +1,5 @@
 // Gateway tools (#18 phase B): tools the gateway serves itself, merged into
-// engram's tools/list and run through the same pipeline (authorize -> redact ->
+// engram's tools/list and run through the same pipeline (authorize -> host paths -> redact ->
 // handler -> audit -> wrap). First tool: brain_health (owner only), plus the
 // admin-only HTTP endpoint GET /admin/brains/<slug>/health.
 import { test } from 'node:test';
@@ -185,7 +185,8 @@ async function gateway(t, { auth = true } = {}) {
     return client;
   };
   const audit = () => [...auditLog.read()].map(row => [row.actorLogin, row.brain, row.target, row.outcome]);
-  return { state, url, connect, audit };
+  const auditRows = () => [...auditLog.read()];
+  return { state, url, connect, audit, auditRows };
 }
 
 test('over MCP: an owner sees brain_health next to engram tools and gets the report; it never reaches engram and is audited', async t => {
@@ -211,6 +212,20 @@ test('over MCP: writers and readers neither see nor may call brain_health; refus
     await assert.rejects(client.callTool({ name: 'brain_health', arguments: {} }), error => error.code === -32602 && /brain_health/.test(error.message));
   }
   assert.deepEqual(gw.audit(), [['wendy', 'team', 'brain_health', 'denied'], ['rita', 'team', 'brain_health', 'denied']]);
+  assert.deepEqual(gw.auditRows().map(row => row.meta.denyReason), ['insufficient_role', 'insufficient_role'], 'a denied gateway-tool call audits why (#32)');
+});
+
+test('over MCP: gateway tools pass the host-paths stage; cwd and directory never reach the handler and the audit row counts them', async t => {
+  const gw = await gateway(t);
+  gw.state.login = 'olive';
+  const owner = await gw.connect('/mcp/team');
+  // brain_health refuses unknown options, so a success proves cwd and directory were dropped before the handler.
+  const result = await owner.callTool({ name: 'brain_health', arguments: { cwd: '/etc', directory: '/root', sampleSize: 1 } });
+  assert.ok(!result.isError, `host path arguments were stripped: ${JSON.stringify(result.content).slice(0, 200)}`);
+  assert.deepEqual(unwrapJson(result).noise.sampleIds, [1]);
+  const rows = gw.auditRows();
+  assert.deepEqual(rows.map(row => [row.target, row.outcome, row.meta.hostPathArguments]), [['brain_health', 'ok', 2]]);
+  assert.ok(!JSON.stringify(rows).includes('/etc') && !JSON.stringify(rows).includes('/root'), 'no host path in the audit log');
 });
 
 test('over MCP: the instance admin gets the report of a brain without engram.db as a tool error', async t => {
