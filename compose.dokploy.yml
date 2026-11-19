@@ -18,6 +18,11 @@
 #   ENGRAM_CLOUD_SERVER, ENGRAM_CLOUD_TOKEN, ENGRAM_CLOUD_AUTOSYNC
 #                         Engram Cloud sync, passed only to the brains listed in
 #   ENGRAM_CLOUD_BRAINS   e.g. default (to keep syncing the pre-brains memory)
+#   BACKUP_DIR            e.g. /data/backups, turns on encrypted daily backups;
+#   BACKUP_KEY_FILE       then required: a file holding `openssl rand -base64 32`
+#                         (e.g. /data/secrets/backup.key, mode 0600); keep a copy
+#                         off the server. BACKUP_RETENTION (14), BACKUP_SCHEDULE
+#                         (03:00 UTC), BACKUP_JITTER, BACKUP_PREVIOUS_KEY_FILES.
 
 services:
   engram-gateway:
@@ -43,6 +48,12 @@ services:
       ENGRAM_CLOUD_SERVER: ${ENGRAM_CLOUD_SERVER:-}
       ENGRAM_CLOUD_TOKEN: ${ENGRAM_CLOUD_TOKEN:-}
       ENGRAM_CLOUD_AUTOSYNC: ${ENGRAM_CLOUD_AUTOSYNC:-}
+      BACKUP_DIR: ${BACKUP_DIR:-}
+      BACKUP_KEY_FILE: ${BACKUP_KEY_FILE:-}
+      BACKUP_PREVIOUS_KEY_FILES: ${BACKUP_PREVIOUS_KEY_FILES:-}
+      BACKUP_RETENTION: ${BACKUP_RETENTION:-}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-}
+      BACKUP_JITTER: ${BACKUP_JITTER:-}
       # One reverse proxy (Traefik) in front: trust it for the client IP
       # (rate limits).
       TRUST_PROXY: "1"

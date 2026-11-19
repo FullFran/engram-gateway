@@ -309,6 +309,90 @@ id, and a fixed `errorKind` such as `forward_failed`).
   spreadsheet does not run them as formulas. The admin-only HTTP endpoint
   comes with the admin API.
 
+### Backups
+
+Set `BACKUP_DIR` to turn on encrypted daily backups. Every run takes one
+snapshot of each brain (its `engram.db`, plus `vectors.db` and `wiki.db` when
+they exist) and one of the gateway database, then keeps the newest
+`BACKUP_RETENTION` snapshots of each.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BACKUP_DIR` | unset (backups off) | Absolute directory of the snapshots. Must be a local filesystem (no NFS). |
+| `BACKUP_KEY_FILE` | required when `BACKUP_DIR` is set | File holding the encryption key. Missing or unreadable: the gateway refuses to start. |
+| `BACKUP_PREVIOUS_KEY_FILES` | none | Comma-separated older key files, only to read snapshots taken before a key rotation. |
+| `BACKUP_RETENTION` | `14` | Snapshots kept per brain and for the gateway database. |
+| `BACKUP_SCHEDULE` | `03:00` | Daily run time, `HH:MM` in UTC, or `off` for on-demand runs only. |
+| `BACKUP_JITTER` | `300` | Up to this many seconds of random delay added to each scheduled run. |
+
+**How a snapshot is taken.** `VACUUM INTO` through a read-only SQLite
+connection: one read transaction, so the copy is consistent even while the
+brain's `engram mcp` child (or the gateway) writes in WAL mode. Files are
+never copied byte by byte (a copy without the `-wal` file loses recent
+writes). Backing up never starts a brain's child; a brain without a database
+yet is skipped. Each copy passes `PRAGMA integrity_check` before it is
+encrypted. Layout: `$BACKUP_DIR/brains/<brain>/<snapshot>/engram.db.enc` and
+`$BACKUP_DIR/gateway/<snapshot>/gateway.db.enc`, where `<snapshot>` is the
+UTC time it was taken (`YYYYMMDDTHHMMSSmmmZ`). An interrupted run leaves a
+`<snapshot>.partial` directory that the next run removes.
+
+**Encryption and key.** AES-256-GCM (Node's `crypto`), a random 12-byte IV
+per file, the 16-byte authentication tag at the end. The header (format
+version, key id, IV, and which brain and file the data belongs to) is
+authenticated too, so a snapshot cannot be altered, truncated or restored
+into another brain without failing. The key is 32 random bytes, written as
+base64 or 64 hex characters; it is never logged:
+
+```sh
+openssl rand -base64 32 > backup.key && chmod 600 backup.key
+```
+
+Keep a copy of the key outside the server: snapshots cannot be read without
+it. Key rotation: write a new key file, point `BACKUP_KEY_FILE` at it and
+move the old file to `BACKUP_PREVIOUS_KEY_FILES`; new snapshots use the new
+key, old ones still restore. Once every snapshot older than the rotation has
+expired (`BACKUP_RETENTION` days), drop the old key.
+
+**Commands.** `node dist/cli.js` (in the container: `docker exec <container>
+node dist/cli.js ...`) reads the same environment as the gateway:
+
+```sh
+node dist/cli.js backup now                      # snapshot everything now
+node dist/cli.js backup list                     # snapshots, by brain
+node dist/cli.js restore <brain> <snapshot>      # e.g. restore work 20261119T030012345Z
+node dist/cli.js backup decrypt <file.enc> <out> # decrypt one file (manual recovery)
+```
+
+While the gateway runs, these go through its control socket
+(`$BACKUP_DIR/control.sock`, mode 0600), so the schedule and the CLI never
+run at the same time. With no gateway running they run in the CLI process.
+
+**Restore runbook (one brain).**
+
+1. `backup list` and pick a snapshot of the brain.
+2. `restore <brain> <snapshot>`. Every file is decrypted and checked with
+   `PRAGMA integrity_check` first; nothing changes if that fails. Then the
+   brain's child is stopped through the brain registry (requests in flight
+   on that brain fail; new ones wait), stale `-wal`/`-shm` files are removed
+   and each file is renamed into place atomically. The next request starts a
+   new child on the restored data. Other brains keep serving.
+
+**Restore runbook (gateway database).** It holds OAuth clients, tokens and
+the brains table, and is never restored while the gateway runs:
+
+1. Stop the gateway (with Docker, run the next step in a one-off container
+   on the same volume: `docker run --rm -v <volume>:/data --env-file ... <image> node dist/cli.js ...`).
+2. `backup decrypt $BACKUP_DIR/gateway/<snapshot>/gateway.db.enc /data/gateway/gateway.db.restored`.
+3. Move `gateway.db`, `gateway.db-wal` and `gateway.db-shm` aside, rename
+   `gateway.db.restored` to `gateway.db`, and start the gateway.
+
+Rolling back to an image older than the SQLite gateway database (#24)
+starts with an empty token store: clients sign in again.
+
+**Not covered.** Snapshots stay on the same volume as the data, so the VPS
+disk is still a single point of failure. Copy `$BACKUP_DIR` off the server
+(the files are already encrypted) if you need off-site backups.
+
 ## Develop
 
 ```sh

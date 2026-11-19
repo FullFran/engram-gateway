@@ -7,18 +7,22 @@
  * accepting connections, stops every `engram mcp` child, then closes the
  * database.
  *
+ * Backups (`BACKUP_*`, see `resolveBackupConfig`): a daily in-process
+ * timer and a local control socket for the CLI (`node dist/cli.js`).
+ *
  * Bridge settings: ENGRAM_BIN (default `engram`), ENGRAM_ARGS (default
  * `mcp`, split on whitespace). Brain settings: see `resolveBrainsConfig`.
  */
 import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
 import { GrantAccessPolicy, SqliteGrantRepository, bootstrapAccess, createToolAccess, parseAdminLogins, parseBrainGrants } from './authz/index.js';
+import { BackupService, CONTROL_SOCKET_NAME, createBackupCipher, resolveBackupConfig, serveBackupControl, sqliteSnapshotter, startBackupSchedule } from './backup/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createEngramBridge } from './bridge/index.js';
-import { resolveGatewayConfig } from './config.js';
+import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
 import { createGatewayApp } from './http/app.js';
 import { createAuditStage, createToolCallPipeline } from './pipeline/index.js';
@@ -36,24 +40,18 @@ function onStopSignals(stop: (signal: string) => void): void {
   process.on('SIGINT', () => stop('SIGINT'));
 }
 
-/** Same location rule as the auth config: `GATEWAY_DB_PATH`, else `$GATEWAY_DATA_DIR/gateway.db`, else in memory. */
-function gatewayDbPath(env: NodeJS.ProcessEnv): string {
-  const explicit = env.GATEWAY_DB_PATH?.trim();
-  if (explicit) return resolve(explicit);
-  const dataDir = env.GATEWAY_DATA_DIR?.trim();
-  return dataDir ? join(resolve(dataDir), 'gateway.db') : ':memory:';
-}
-
 async function main(): Promise<void> {
   const config = resolveGatewayConfig(process.env);
   const brainsConfig = resolveBrainsConfig(process.env);
+  // Backups on without a usable key must fail here, before anything starts.
+  const backupConfig = resolveBackupConfig(process.env);
   const brainGrants = parseBrainGrants(process.env.BRAIN_GRANTS);
   const cloudWarning = cloudSyncWarning(process.env, brainsConfig);
   if (cloudWarning) logger.warn(cloudWarning);
 
   const dataDir = process.env.GATEWAY_DATA_DIR?.trim();
   if (dataDir) mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const dbPath = gatewayDbPath(process.env);
+  const dbPath = resolveGatewayDbPath(process.env);
   const db = openGatewayDatabase(dbPath);
   if (dbPath === ':memory:') logger.info('No GATEWAY_DATA_DIR: gateway state (brains table) is kept in memory');
   const brains = bootstrapBrains(new SqliteBrainRepository(db), brainsConfig, logger);
@@ -114,6 +112,25 @@ async function main(): Promise<void> {
   }
   registry.startReaper();
 
+  let backups: { stop(): Promise<void> } | undefined;
+  if (backupConfig.enabled) {
+    mkdirSync(backupConfig.dir, { recursive: true, mode: 0o700 });
+    const service = new BackupService({
+      backupDir: backupConfig.dir,
+      retention: backupConfig.retention,
+      cipher: createBackupCipher(backupConfig),
+      brains: () => brains,
+      ...(dbPath === ':memory:' ? {} : { gatewayDbPath: dbPath }),
+      quiesce: (slug, work) => registry.quiesce(slug, work),
+      clock: { now: () => Date.now() },
+      logger,
+      snapshotter: sqliteSnapshotter
+    });
+    const control = await serveBackupControl(join(backupConfig.dir, CONTROL_SOCKET_NAME), service, logger);
+    const schedule = backupConfig.schedule === 'off' ? undefined : startBackupSchedule(() => service.runAll(), backupConfig.schedule, backupConfig.jitterMs, logger);
+    backups = { stop: async () => { schedule?.stop(); await control.close(); } };
+  }
+
   const app = createGatewayApp({
     bindHost: config.host,
     ...(config.publicBaseUrl ? { publicBaseUrl: config.publicBaseUrl } : {}),
@@ -129,6 +146,7 @@ async function main(): Promise<void> {
 
   let shuttingDown = false;
   const stop = async () => {
+    await backups?.stop();
     await registry.stopAll();
     db.close();
   };
