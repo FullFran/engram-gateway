@@ -47,7 +47,9 @@ WORKDIR /app
 USER engram
 # Durable state: the gateway database (gateway.db) and generated signing
 # secret (/data/gateway, mode 0600), the default brain's Engram database
-# (/data/engram) and every other brain's (/data/brains/<brain>).
+# (/data/engram) and every other brain's (/data/brains/<brain>). Encrypted
+# backups, when BACKUP_DIR is set (e.g. /data/backups), go to the same volume:
+# copy them off the server for off-site safety.
 VOLUME ["/data"]
 
 COPY --from=engram /usr/local/bin/engram /usr/local/bin/engram
@@ -60,6 +62,8 @@ RUN node --input-type=module -e "await import('@modelcontextprotocol/server'); a
     node --input-type=module -e "const { openGatewayDatabase } = await import('/app/dist/shared/gateway-database.js'); openGatewayDatabase('/tmp/smoke/gateway.db').close(); console.log('smoke: gateway database OK')" && \
     rm -rf /tmp/smoke && \
     node --check dist/main.js && \
+    node --check dist/cli.js && \
+    node --check dist/backup/infrastructure/sqlite-worker.js && \
     engram version
 
 ENV NODE_ENV=production \

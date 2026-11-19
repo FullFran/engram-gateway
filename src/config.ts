@@ -1,3 +1,4 @@
+import { join, resolve } from 'node:path';
 import { parsePublicBaseUrl, parseTrustProxy } from './shared/network.js';
 
 export interface GatewayConfig {
@@ -23,4 +24,12 @@ export function resolveGatewayConfig(env: Record<string, string | undefined>): G
     ...(publicBaseUrl ? { publicBaseUrl } : {}),
     trustProxy: parseTrustProxy(env.TRUST_PROXY)
   };
+}
+
+/** The gateway database file: `GATEWAY_DB_PATH`, else `$GATEWAY_DATA_DIR/gateway.db`, else `':memory:'` (same rule as the auth config). */
+export function resolveGatewayDbPath(env: Readonly<Record<string, string | undefined>>): string {
+  const explicit = env.GATEWAY_DB_PATH?.trim();
+  if (explicit) return resolve(explicit);
+  const dataDir = env.GATEWAY_DATA_DIR?.trim();
+  return dataDir ? join(resolve(dataDir), 'gateway.db') : ':memory:';
 }

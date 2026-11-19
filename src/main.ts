@@ -7,18 +7,24 @@
  * accepting connections, stops every `engram mcp` child, then closes the
  * database.
  *
+ * Backups (`BACKUP_*`, see `resolveBackupConfig`): a daily in-process
+ * timer and a local control socket for the CLI (`node dist/cli.js`).
+ *
  * Bridge settings: ENGRAM_BIN (default `engram`), ENGRAM_ARGS (default
  * `mcp`, split on whitespace). Brain settings: see `resolveBrainsConfig`.
  */
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
 import { GrantAccessPolicy, SqliteGrantRepository, bootstrapAccess, createToolAccess, parseAdminLogins, parseBrainGrants } from './authz/index.js';
+import {
+  BackupService, CONTROL_SOCKET_NAME, createBackupCipher, openBrainLock, resolveBackupConfig, serveBackupControl, sqliteSnapshotter, startBackupSchedule
+} from './backup/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createEngramBridge } from './bridge/index.js';
-import { resolveGatewayConfig } from './config.js';
+import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
 import { createGatewayApp } from './http/app.js';
 import { createAuditStage, createToolCallPipeline } from './pipeline/index.js';
@@ -36,24 +42,18 @@ function onStopSignals(stop: (signal: string) => void): void {
   process.on('SIGINT', () => stop('SIGINT'));
 }
 
-/** Same location rule as the auth config: `GATEWAY_DB_PATH`, else `$GATEWAY_DATA_DIR/gateway.db`, else in memory. */
-function gatewayDbPath(env: NodeJS.ProcessEnv): string {
-  const explicit = env.GATEWAY_DB_PATH?.trim();
-  if (explicit) return resolve(explicit);
-  const dataDir = env.GATEWAY_DATA_DIR?.trim();
-  return dataDir ? join(resolve(dataDir), 'gateway.db') : ':memory:';
-}
-
 async function main(): Promise<void> {
   const config = resolveGatewayConfig(process.env);
   const brainsConfig = resolveBrainsConfig(process.env);
+  // Backups on without a usable key must fail here, before anything starts.
+  const backupConfig = resolveBackupConfig(process.env);
   const brainGrants = parseBrainGrants(process.env.BRAIN_GRANTS);
   const cloudWarning = cloudSyncWarning(process.env, brainsConfig);
   if (cloudWarning) logger.warn(cloudWarning);
 
   const dataDir = process.env.GATEWAY_DATA_DIR?.trim();
   if (dataDir) mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const dbPath = gatewayDbPath(process.env);
+  const dbPath = resolveGatewayDbPath(process.env);
   const db = openGatewayDatabase(dbPath);
   if (dbPath === ':memory:') logger.info('No GATEWAY_DATA_DIR: gateway state (brains table) is kept in memory');
   const brains = bootstrapBrains(new SqliteBrainRepository(db), brainsConfig, logger);
@@ -104,6 +104,9 @@ async function main(): Promise<void> {
     maxLiveBrains: brainsConfig.maxLiveBrains,
     logger
   });
+  // Held while this gateway runs: an offline restore (CLI --offline) refuses
+  // a brain that a gateway serves. Taken before any child starts.
+  const brainLocks = new Map(brains.map(brain => [brain.slug, openBrainLock(brain.dataDir)]));
   // Fail at startup, as before, when engram cannot run; the default brain is
   // then reaped like any other once idle.
   const warm = await registry.acquire(DEFAULT_BRAIN);
@@ -113,6 +116,39 @@ async function main(): Promise<void> {
     warm.release();
   }
   registry.startReaper();
+
+  let backups: { stop(): Promise<void> } | undefined;
+  if (backupConfig.enabled) {
+    mkdirSync(backupConfig.dir, { recursive: true, mode: 0o700 });
+    // mkdirSync's mode does not apply to an existing directory.
+    chmodSync(backupConfig.dir, 0o700);
+    const service = new BackupService({
+      backupDir: backupConfig.dir,
+      retention: backupConfig.retention,
+      cipher: createBackupCipher(backupConfig),
+      brains: () => brains,
+      ...(dbPath === ':memory:' ? {} : { gatewayDbPath: dbPath }),
+      // Stop the child and hold requests, then take the brain's exclusive lock
+      // (refused while another gateway, e.g. mid-deploy, serves it).
+      quiesce: (slug, work) => registry.quiesce(slug, () => {
+        const lock = brainLocks.get(slug);
+        if (!lock) throw new Error(`unknown brain: ${slug}`);
+        return lock.withExclusive(work);
+      }),
+      clock: { now: () => Date.now() },
+      logger,
+      snapshotter: sqliteSnapshotter
+    });
+    await service.removeStalePartials();
+    // Without the socket the gateway still serves and backs up on schedule;
+    // only the CLI's online commands are unavailable.
+    const control = await serveBackupControl(join(backupConfig.dir, CONTROL_SOCKET_NAME), service, logger).catch(error => {
+      logger.error('Backup control socket unavailable; `backup now` and `restore` from the CLI will not reach this gateway', { error: (error as Error).message });
+      return undefined;
+    });
+    const schedule = backupConfig.schedule === 'off' ? undefined : startBackupSchedule(() => service.runAll(), backupConfig.schedule, backupConfig.jitterMs, logger);
+    backups = { stop: async () => { schedule?.stop(); await control?.close(); } };
+  }
 
   const app = createGatewayApp({
     bindHost: config.host,
@@ -129,7 +165,9 @@ async function main(): Promise<void> {
 
   let shuttingDown = false;
   const stop = async () => {
+    await backups?.stop();
     await registry.stopAll();
+    for (const lock of brainLocks.values()) lock.close();
     db.close();
   };
   const shutdown = (signal: string) => {

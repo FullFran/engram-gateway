@@ -48,6 +48,8 @@ export class BrainRegistry<P extends BrainProcess> {
   private readonly entries = new Map<string, Entry<P>>();
   /** Brains whose child is shutting down, by slug: settles once it has exited. */
   private readonly closing = new Map<string, Promise<void>>();
+  /** Brains held by `quiesce`, by slug: settles once the held work is done. */
+  private readonly held = new Map<string, Promise<void>>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
 
@@ -68,6 +70,11 @@ export class BrainRegistry<P extends BrainProcess> {
       if (this.stopped) throw new Error('brain registry is stopped');
       const brain = this.options.brains.get(slug);
       if (!brain) throw new Error(`unknown brain: ${slug}`);
+      const hold = this.held.get(slug);
+      if (hold) {
+        await hold;
+        continue;
+      }
       const existing = this.entries.get(slug);
       if (existing) return this.lease(existing);
       const previous = this.closing.get(slug);
@@ -131,6 +138,26 @@ export class BrainRegistry<P extends BrainProcess> {
       });
     this.closing.set(slug, done);
     return done;
+  }
+
+  /**
+   * Runs `work` while the brain has no child: stops its process (requests in
+   * flight on it fail), holds new requests for the brain until `work`
+   * settles, then lets the next request start a fresh child. Used to swap
+   * the brain's database files (restore).
+   */
+  async quiesce<T>(slug: string, work: () => Promise<T>): Promise<T> {
+    if (!this.options.brains.has(slug)) throw new Error(`unknown brain: ${slug}`);
+    while (this.held.has(slug)) await this.held.get(slug);
+    let release!: () => void;
+    this.held.set(slug, new Promise<void>(resolve => { release = resolve; }));
+    try {
+      await this.stop(slug);
+      return await work();
+    } finally {
+      this.held.delete(slug);
+      release();
+    }
   }
 
   /** Stops every process and refuses further requests (shutdown). */
