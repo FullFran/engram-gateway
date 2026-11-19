@@ -114,7 +114,7 @@ test('migration 6 keeps tokens issued before it: they stay single-brain (no conn
   assert.deepEqual(record, { clientId: CIMD_ID, login: 'owner-o', scope: 'memory', resource: BASE, expiresAt: exp, familyId: 'fam-old' });
 });
 
-test('consent on the bare /mcp resource offers every granted brain with roles up to the owner\'s; default brain preselected at the owner\'s role', async t => {
+test('consent on the bare /mcp resource offers every granted brain with roles up to the owner\'s; default brain preselected as reader, the least privilege', async t => {
   const w = world(t);
   const session = w.sessions.issue('owner-o').value;
   const begin = await w.authorization.begin(query(), session);
@@ -125,7 +125,7 @@ test('consent on the bare /mcp resource offers every granted brain with roles up
     brains: [
       { brain: 'alpha', roles: ['reader', 'writer', 'owner'] },
       { brain: 'beta', roles: ['reader'] },
-      { brain: 'default', roles: ['reader', 'writer', 'owner'], selected: 'owner' }
+      { brain: 'default', roles: ['reader', 'writer', 'owner'], selected: 'reader' }
     ]
   });
 });
