@@ -27,7 +27,9 @@ import { CONNECTION_TOOL_KINDS, GATEWAY_TOOL_ROLES, GrantAccessPolicy, SqliteGra
 import {
   BackupService, CONTROL_SOCKET_NAME, createBackupCipher, openBrainLock, resolveBackupConfig, serveBackupControl, sqliteSnapshotter, startBackupSchedule
 } from './backup/index.js';
+import type { BrainLock } from './backup/index.js';
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
+import type { Brain } from './brains/index.js';
 import { createConnectionServer, createEngramBridge } from './bridge/index.js';
 import {
   ConnectionAdmin, ConnectionConsentService, PersonalAccessTokens, adminPatPort, SqliteConnectionStore, SqlitePatStore, createAccountRouter, nodePatSecrets, patIdentityProvider
@@ -129,8 +131,11 @@ async function main(): Promise<void> {
 
   // Gateway tools (served by the gateway, same pipeline): brain_health (#18),
   // read-only from each brain's engram.db, never through its child.
-  const dataDirs = new Map(brains.map(brain => [brain.slug, brain.dataDir]));
-  const health = createEngramBrainHealthService({ dataDirOf: slug => dataDirs.get(slug) });
+  // Per-brain side state is looked up in the brains table on every use (#43),
+  // archived brains included: a brain created by the admin API or CLI after
+  // startup needs no restart.
+  const brainOf = (slug: string) => brainRepo.list().find(brain => brain.slug === slug);
+  const health = createEngramBrainHealthService({ dataDirOf: slug => brainOf(slug)?.dataDir });
   // Connection tools (#27): checked against engram's and the gateway's names, served only on the bare /mcp.
   // brain_resolve (#12) is both: a brain tool on /mcp/<brain>, a connection tool on /mcp (no `brain` argument).
   const connectionAdmin = new ConnectionAdmin(grants, connections);
@@ -141,12 +146,25 @@ async function main(): Promise<void> {
 
   const command = process.env.ENGRAM_BIN?.trim() || 'engram';
   const args = (process.env.ENGRAM_ARGS?.trim() || 'mcp').split(/\s+/);
+  // Held while this gateway runs: an offline restore (CLI --offline) refuses
+  // a brain that a gateway serves. Taken before the brain's child starts; a
+  // brain created at runtime gets its lock when it is first served.
+  const brainLocks = new Map<string, BrainLock>();
+  const brainLockOf = (brain: Brain): BrainLock => {
+    let lock = brainLocks.get(brain.slug);
+    if (!lock) {
+      lock = openBrainLock(brain.dataDir);
+      brainLocks.set(brain.slug, lock);
+    }
+    return lock;
+  };
   const registry = new BrainRegistry({
     // Read on every request: brains created or archived by the admin API or
     // CLI are served or refused without a restart.
     brains: { get: slug => brainRepo.findActive(slug) },
     createProcess: brain => {
       mkdirSync(brain.dataDir, { recursive: true, mode: 0o700 });
+      brainLockOf(brain);
       return createEngramBridge({ command, args, pipeline, gatewayTools, env: buildChildEnv(brain, process.env), logger, brain: brain.slug });
     },
     clock: { now: () => Date.now() },
@@ -154,9 +172,8 @@ async function main(): Promise<void> {
     maxLiveBrains: brainsConfig.maxLiveBrains,
     logger
   });
-  // Held while this gateway runs: an offline restore (CLI --offline) refuses
-  // a brain that a gateway serves. Taken before any child starts.
-  const brainLocks = new Map(brains.map(brain => [brain.slug, openBrainLock(brain.dataDir)]));
+  // Every brain known at startup is locked before any child starts.
+  for (const brain of brains) brainLockOf(brain);
   // Fail at startup, as before, when engram cannot run; the default brain is
   // then reaped like any other once idle.
   const warm = await registry.acquire(DEFAULT_BRAIN);
@@ -176,7 +193,7 @@ async function main(): Promise<void> {
       backupDir: backupConfig.dir,
       retention: backupConfig.retention,
       cipher: createBackupCipher(backupConfig),
-      brains: () => brains,
+      brains: () => brainRepo.list(),
       ...(dbPath === ':memory:' ? {} : { gatewayDbPath: dbPath }),
       // Stop the child and hold requests, then take the brain's exclusive lock
       // (refused while another gateway, e.g. mid-deploy, serves it).
@@ -185,9 +202,9 @@ async function main(): Promise<void> {
       // the lock; its data keeps being backed up.
       quiesce: (slug, work) => {
         const exclusive = () => {
-          const lock = brainLocks.get(slug);
-          if (!lock) throw new Error(`unknown brain: ${slug}`);
-          return lock.withExclusive(work);
+          const brain = brainOf(slug);
+          if (!brain) throw new Error(`unknown brain: ${slug}`);
+          return brainLockOf(brain).withExclusive(work);
         };
         return registry.has(slug) ? registry.quiesce(slug, exclusive) : registry.stop(slug).then(exclusive);
       },
