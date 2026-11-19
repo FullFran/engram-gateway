@@ -21,7 +21,7 @@ import { mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  assert, assertEqual, cookieHeader, freePort, githubEnv, githubLogin, mcpCall, mcpToolsList, repoRoot, request, startFakeGitHub, startGateway
+  assert, assertEqual, cookieHeader, setCookies, sleep, freePort, githubEnv, githubLogin, mcpCall, mcpToolsList, repoRoot, request, startFakeGitHub, startGateway
 } from './lib/harness.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'engram-gateway-pats-'));
@@ -29,6 +29,18 @@ let passed = 0;
 const ok = label => { passed += 1; console.log(`  ok - ${label}`); };
 const toolText = result => (result?.result?.content ?? []).map(part => part.text ?? '').join('\n');
 const bearer = token => ({ authorization: `Bearer ${token}` });
+
+/** A device sign-in as a browser does it, ending on the page the browser lands on. */
+async function signInPage(base, github, login) {
+  const headers = { 'x-forwarded-for': '198.18.250.1' };
+  const started = await request(base, { method: 'POST', path: '/oauth/login', headers: { ...headers, origin: base }, form: { return_to: '/' } });
+  const jar = setCookies(started);
+  const device = await request(base, { path: '/oauth/device', headers: { ...headers, cookie: cookieHeader(jar) } });
+  github.approve(/class="user-code">([A-Z0-9-]+)</.exec(device.text)?.[1], login);
+  await sleep(1100);
+  await request(base, { method: 'POST', path: '/oauth/device/poll', headers: { ...headers, accept: 'text/html', origin: base, cookie: cookieHeader(jar) } });
+  return request(base, { path: '/oauth/device', headers: { ...headers, cookie: cookieHeader(jar) } });
+}
 
 async function checkPats(github) {
   const port = await freePort();
@@ -115,6 +127,9 @@ async function checkPats(github) {
     const botSaved = await mcpCall(base, '/mcp', 'mem_save', { title: `${marker}-bot`, content: `service account wrote ${marker}`, type: 'discovery' }, bearer(botToken));
     assert(botSaved.result?.result && !botSaved.result.result.isError, `a service account's PAT saves: ${botSaved.text.slice(0, 200)}`);
     assertEqual((await githubLogin(base, github, 'ci-bot')).jar, null, 'a GitHub user with the service account\'s login cannot sign in');
+    const refusal = await signInPage(base, github, 'ci-bot');
+    assertEqual(refusal.status, 403, 'refusal page');
+    assert(refusal.text.includes('ci-bot is a service account of this gateway: it uses personal access tokens and cannot sign in'), `the page says why: ${refusal.text.slice(0, 400)}`);
     cli('users', 'disable', 'ci-bot');
     assertEqual((await mcpToolsList(base, '/mcp', bearer(botToken))).status, 401, 'a disabled service account\'s PAT gets 401');
     ok('a service account uses its own grants through its PAT, never signs in, and disabling it blocks the token');

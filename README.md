@@ -431,11 +431,21 @@ its owner; it is a `users` row with `kind = 'service'`.
   its own personal access tokens, issued by an admin
   (`/admin/api/service-accounts/<login>/tokens` or `admin tokens create`).
 - It can never sign in: a GitHub user with the same login is refused at
-  sign-in, and it has no session for `/account/api`. Its login takes the
+  sign-in (the page says the login is a service account of this gateway),
+  and it has no session for `/account/api`. Its login takes the
   name in the `users` table, so pick one no person uses (for example
   `ci-<project>`).
 - It is never an instance admin: listing it in `ALLOWED_GITHUB_LOGINS`
-  stops the gateway at startup with an error.
+  stops the gateway at startup with an error. `BRAIN_GRANTS` may give it a
+  role, like `admin grants set`; that is a configuration grant, and it still
+  never signs in.
+- It answers to its owner: at startup, a service account whose owner is no
+  longer an active instance admin (removed from `ALLOWED_GITHUB_LOGINS`) is
+  disabled, logged (`Service account disabled`) and audited
+  (`service_account.disable`, system actor `startup`), so its tokens get 401.
+  It cannot be enabled again while its owner is not an admin; create a new
+  service account instead. `service-accounts list` shows it as `disabled`
+  with its old owner.
 - Disable it (`admin users disable`, `POST /admin/api/users/<login>/disable`)
   and its tokens get 401 on the next request; revoking a grant blocks that
   brain on the next request, as for a person.
