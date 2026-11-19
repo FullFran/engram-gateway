@@ -131,4 +131,15 @@ export class SqliteAdminStore implements AdminStore {
   readAudit(filter: AuditFilter): Iterable<AuditRecord> {
     return this.auditLog.read(filter);
   }
+
+  countAudit(filter: AuditFilter, upTo: number): number {
+    // Same filter as SqliteAuditLog.read; the LIMIT stops the scan at `upTo`.
+    const where = ['1 = 1'];
+    const params: SQLInputValue[] = [];
+    if (filter.brain !== undefined) { where.push('brain_id = ?'); params.push(filter.brain); }
+    if (filter.fromMs !== undefined) { where.push('at_ms >= ?'); params.push(filter.fromMs); }
+    if (filter.toMs !== undefined) { where.push('at_ms < ?'); params.push(filter.toMs); }
+    const row = this.db.prepare(`SELECT count(*) AS n FROM (SELECT 1 FROM audit_log WHERE ${where.join(' AND ')} LIMIT ?)`).get(...params, upTo);
+    return Number(row?.n ?? 0);
+  }
 }

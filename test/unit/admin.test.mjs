@@ -76,7 +76,8 @@ test('a signed-in user who is not an instance admin is denied every operation, a
   assert.equal(s.grants.roleOf('alice', 'team'), 'owner');
   assert.equal(s.db.prepare("SELECT count(*) AS n FROM users WHERE github_login = 'mallory'").get().n, 0);
   const rows = s.audit();
-  assert.equal(rows.length, attempts.length + 2);
+  // The owner's repeated invite is the same login and action within a minute: one row (see the dedupe test).
+  assert.equal(rows.length, attempts.length + 1);
   assert.ok(rows.every(row => row.outcome === 'denied'));
   assert.deepEqual(rows.slice(0, 3).map(row => [row.actor, row.action, row.brain, row.target]), [
     ['alice', 'brain.list', null, null], ['alice', 'brain.create', 'evil', 'evil'], ['alice', 'brain.archive', 'team', 'team']
@@ -278,6 +279,32 @@ test('the audit CSV export streams the log, filters by brain, and is itself audi
   assert.deepEqual(s.audit().at(-1), { actor: 'FullFran', brain: 'research', action: 'audit.export', target: null, outcome: 'ok', meta: {} });
 });
 
+test('denied attempts are audited once per login and action per minute, so a non-admin cannot flood the log', t => {
+  const s = scratch(t);
+  let now = 1_000_000;
+  const service = new AdminService({ store: new SqliteAdminStore(s.db), dirs: fsBrainDirectories(s.root), clock: { nowMs: () => now }, runtime: { stop: async () => {}, status: () => ({ live: false, idle: false }) } });
+  for (let i = 0; i < 50; i++) assert.throws(() => service.listUsers(ALICE), rejectsWith('forbidden'));
+  assert.throws(() => service.listBrains(ALICE), rejectsWith('forbidden'));
+  assert.throws(() => service.listUsers({ kind: 'user', login: 'mallory' }), rejectsWith('forbidden'));
+  now += 59_999;
+  assert.throws(() => service.listUsers(ALICE), rejectsWith('forbidden'));
+  now += 1;
+  assert.throws(() => service.listUsers(ALICE), rejectsWith('forbidden'), 'still denied, whether recorded or not');
+  assert.deepEqual(s.audit().map(row => [row.actor, row.action, row.outcome]), [
+    ['alice', 'user.list', 'denied'], ['alice', 'brain.list', 'denied'], ['mallory', 'user.list', 'denied'], ['alice', 'user.list', 'denied']
+  ]);
+});
+
+test('the audit export refuses more rows than its limit, before writing anything, and audits the refusal', t => {
+  const s = scratch(t);
+  for (let i = 0; i < 5; i++) s.service.inviteUser(ADMIN, `user${i}`);
+  assert.throws(() => s.service.exportAudit(ADMIN, {}, { maxRows: 4 }), rejectsWith('invalid', /more than 4 rows.*from.*to/));
+  assert.deepEqual(s.audit().at(-1), { actor: 'FullFran', brain: null, action: 'audit.export', target: null, outcome: 'error', meta: { errorKind: 'invalid' } });
+  // The refusal row makes 6: within a limit of 6 the export runs.
+  assert.equal([...s.service.exportAudit(ADMIN, {}, { maxRows: 6 })].length, 1 + 6 + 1, 'header, six rows, the export row itself');
+  assert.equal([...s.service.exportAudit(ADMIN, { fromMs: Date.now() + 60_000 }, { maxRows: 1 })].length, 1, 'a bounded range fits under the limit (header only)');
+});
+
 // ---- HTTP adapter ----
 
 async function adminServer(t, s, registry) {
@@ -391,6 +418,71 @@ test('over HTTP: with auth off the admin API does not exist', async t => {
   const response = await fetch(`http://127.0.0.1:${server.address().port}/admin/api/brains`);
   assert.equal(response.status, 404);
   assert.equal(s.audit().length, 0);
+});
+
+/** The admin router alone, with a fixed signed-in login. */
+async function routerServer(t, service, { login = 'FullFran', maxExportRows } = {}) {
+  const { createAdminRouter } = await import('../../dist/admin/index.js');
+  const app = express();
+  app.use('/admin/api', createAdminRouter({ service, identify: async () => login, logger: quiet, ...(maxExportRows !== undefined ? { maxExportRows } : {}) }));
+  const server = createServer(app);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections?.(); server.close(resolve); }));
+  return `http://127.0.0.1:${server.address().port}/admin/api`;
+}
+
+test('over HTTP: a large audit export streams every row; above the limit it is a JSON 400 asking for a narrower range', async t => {
+  const s = scratch(t);
+  const insert = s.db.prepare("INSERT INTO audit_log (at_ms, actor_kind, actor_id, brain_id, action, target, outcome, duration_ms, meta_json) VALUES (?, 'system', 'test', 'team', 'tool.mem_search', NULL, 'ok', 1, ?)");
+  s.db.exec('BEGIN');
+  for (let i = 0; i < 30_000; i++) insert.run(1_000 + i, JSON.stringify({ padding: 'x'.repeat(200) }));
+  s.db.exec('COMMIT');
+  const base = await routerServer(t, s.service, { maxExportRows: 40_000 });
+  const csv = await fetch(`${base}/audit.csv`);
+  assert.equal(csv.status, 200);
+  const lines = (await csv.text()).trimEnd().split('\r\n');
+  assert.equal(lines.length, 1 + 30_000 + 1, 'header, every row, the export row');
+  assert.match(lines.at(-2), /tool\.mem_search/);
+
+  const capped = await routerServer(t, s.service, { maxExportRows: 10_000 });
+  const refused = await fetch(`${capped}/audit.csv`);
+  assert.equal(refused.status, 400);
+  assert.match(refused.headers.get('content-type'), /application\/json/);
+  assert.match((await refused.json()).message, /more than 10000 rows/);
+  const ranged = await fetch(`${capped}/audit.csv?from=1000&to=6000`);
+  assert.equal(ranged.status, 200);
+  assert.equal((await ranged.text()).trimEnd().split('\r\n').length, 1 + 5_000);
+});
+
+test('over HTTP: malformed JSON, oversized bodies and unexpected errors are JSON errors without a stack', async t => {
+  const s = scratch(t);
+  const base = await routerServer(t, s.service);
+  const malformed = await fetch(`${base}/brains`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"slug": ' });
+  assert.equal(malformed.status, 400);
+  assert.match(malformed.headers.get('content-type'), /application\/json/);
+  assert.deepEqual(await malformed.json(), { error: 'invalid', message: 'the body is not valid JSON' });
+  const large = await fetch(`${base}/brains`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ slug: 'x'.repeat(20_000) }) });
+  assert.equal(large.status, 413);
+  assert.equal((await large.json()).error, 'too_large');
+
+  const failing = { listBrains: () => { throw new Error('disk I/O error at /srv/secret/gateway.db'); } };
+  const broken = await routerServer(t, failing);
+  const internal = await fetch(`${broken}/brains`);
+  assert.equal(internal.status, 500);
+  const text = await internal.text();
+  assert.deepEqual(JSON.parse(text), { error: 'internal' });
+  assert.doesNotMatch(text, /secret|at .*\.js/);
+});
+
+test('over HTTP: a cross-site request is refused on every route, GET audit.csv included, and writes no audit row', async t => {
+  const s = scratch(t);
+  const base = await routerServer(t, s.service);
+  for (const path of ['/audit.csv', '/brains', '/users']) {
+    const response = await fetch(`${base}${path}`, { headers: { 'sec-fetch-site': 'cross-site' } });
+    assert.equal(response.status, 403, path);
+  }
+  assert.equal(s.audit().length, 0, 'no audit.export row from a cross-site navigation');
+  assert.equal((await fetch(`${base}/audit.csv`, { headers: { 'sec-fetch-site': 'same-origin' } })).status, 200);
 });
 
 // ---- CLI adapter ----

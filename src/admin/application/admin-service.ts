@@ -13,7 +13,21 @@ export interface AdminServiceDeps {
   clock: AdminClock;
   /** The running gateway's registry; without it (CLI) an archived brain's child stops when idle. */
   runtime?: BrainRuntime;
+  /**
+   * A refused (`denied`) attempt is recorded once per login and action in
+   * this window, so a signed-in non-admin cannot flood the audit log; every
+   * attempt is still refused. Default one minute.
+   */
+  deniedAuditIntervalMs?: number;
 }
+
+export interface ExportOptions {
+  /** Refuse an export matching more rows than this (the HTTP API sets it; the CLI does not). */
+  maxRows?: number;
+}
+
+const DENIED_AUDIT_INTERVAL_MS = 60_000;
+const DENIED_MEMORY = 10_000;
 
 export interface BrainListing extends BrainView {
   /** Only from the running gateway: whether the brain's child runs, and whether it serves no request. */
@@ -51,6 +65,9 @@ function requireLogin(login: string): string {
  * audited too (outcome `error` / `denied`). Never secrets in the log.
  */
 export class AdminService {
+  /** Last recorded `denied` row per login and action (in this process). */
+  private readonly deniedAt = new Map<string, number>();
+
   constructor(private readonly deps: AdminServiceDeps) {}
 
   // ---- Brains ----
@@ -175,11 +192,17 @@ export class AdminService {
   // ---- Audit ----
 
   /** The audit log as CSV lines (header first), streamed; the export itself is audited. */
-  exportAudit(actor: AdminActor, filter: AuditFilter = {}): Iterable<string> {
+  exportAudit(actor: AdminActor, filter: AuditFilter = {}, options: ExportOptions = {}): Iterable<string> {
     const meta: AuditMeta = {};
     if (filter.fromMs !== undefined) meta.fromMs = filter.fromMs;
     if (filter.toMs !== undefined) meta.toMs = filter.toMs;
-    this.mutate(actor, { action: 'audit.export', brain: filter.brain ?? null, target: null }, () => ({ result: undefined, meta }));
+    const { maxRows } = options;
+    this.mutate(actor, { action: 'audit.export', brain: filter.brain ?? null, target: null }, () => {
+      if (maxRows !== undefined && this.deps.store.countAudit(filter, maxRows + 1) > maxRows) {
+        throw new AdminError('invalid', `the export matches more than ${maxRows} rows: narrow it with from and to (or brain), or use the CLI`);
+      }
+      return { result: undefined, meta };
+    });
     return auditCsvLines(this.deps.store.readAudit(filter));
   }
 
@@ -202,8 +225,24 @@ export class AdminService {
   /** Deny by default: only an active instance admin (or the CLI) passes; a refused user is audited as `denied`. */
   private authorize(actor: AdminActor, op: Operation): void {
     if (actor.kind === 'system' || this.deps.store.isAdmin(actor.login)) return;
-    this.record(actor, op, 'denied', this.deps.clock.nowMs(), {});
+    if (this.shouldRecordDenied(actor.login, op.action)) this.record(actor, op, 'denied', this.deps.clock.nowMs(), {});
     throw new AdminError('forbidden', 'the instance admin role is required');
+  }
+
+  private shouldRecordDenied(login: string, action: string): boolean {
+    const now = this.deps.clock.nowMs();
+    const interval = this.deps.deniedAuditIntervalMs ?? DENIED_AUDIT_INTERVAL_MS;
+    const key = `${login.toLowerCase()}\n${action}`;
+    const last = this.deniedAt.get(key);
+    if (last !== undefined && now - last < interval) return false;
+    if (this.deniedAt.size >= DENIED_MEMORY) {
+      for (const [k, at] of this.deniedAt) if (now - at >= interval) this.deniedAt.delete(k);
+      // Still full of recent keys (many logins at once): forget the oldest rather than grow.
+      if (this.deniedAt.size >= DENIED_MEMORY) this.deniedAt.delete(this.deniedAt.keys().next().value!);
+    }
+    this.deniedAt.delete(key);
+    this.deniedAt.set(key, now);
+    return true;
   }
 
   /** Runs one mutation and its audit row in one transaction; a refused one leaves an `error` row. */

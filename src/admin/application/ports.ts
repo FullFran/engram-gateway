@@ -31,6 +31,8 @@ export interface AdminStore {
   audit(event: AuditEvent): void;
   /** Reads audit rows oldest first, lazily. */
   readAudit(filter: AuditFilter): Iterable<AuditRecord>;
+  /** How many audit rows match, counting no further than `upTo`. */
+  countAudit(filter: AuditFilter, upTo: number): number;
 }
 
 /** Brain data directories on disk. */

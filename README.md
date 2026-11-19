@@ -365,14 +365,29 @@ are ISO 8601 or epoch milliseconds; `--out` never overwrites a file (mode
 database directly (WAL, shared safely with the running gateway) and is
 audited as the system actor `cli`.
 
+Run it as the **same user as the gateway** (`docker exec --user <uid>
+<container> ...`, or the image's default user). Run as another user (for
+example `docker exec --user root`), `brains create` makes the brain
+directory owned by that user (mode `0700`), and the gateway cannot open
+the brain afterwards; a fresh gateway database it creates is owned by that
+user too.
+
 **HTTP API**, under `/admin/api`, only with authentication on (with auth off
 it does not exist; use the CLI). It accepts the signed-in browser session
 of an instance admin, the cookie set by the GitHub sign-in at
 `/oauth/login`; bearer tokens are never accepted (they are issued for the
 MCP endpoints). Anyone else gets `401` (no session) or `403` (not an admin,
-audited as `denied`). Requests that change something must send
-`Content-Type: application/json` (`415` otherwise) and are refused (`403`)
-when the browser marks them `Sec-Fetch-Site: cross-site`.
+audited as `denied` once per login and operation per minute, so repeated
+attempts cannot flood the log; every attempt is still refused). Any request
+the browser marks `Sec-Fetch-Site: cross-site` is refused with `403`, reads
+and the CSV download included (the session cookie is `SameSite=Lax`, so a
+cross-site link would carry it). Requests that change something must also
+send `Content-Type: application/json` (`415` otherwise).
+
+This is separate from the read-only brain health endpoint
+`GET /admin/brains/<slug>/health` ([Brain health report](#brain-health-report)), which
+also accepts a bearer token and is open with authentication off on
+loopback; `/admin/api` is not mounted at all with authentication off.
 
 | Method and path | Body | Does |
 | --- | --- | --- |
@@ -388,8 +403,15 @@ when the browser marks them `Sec-Fetch-Site: cross-site`.
 | `DELETE /admin/api/brains/<slug>/grants/<login>` | | Revoke a grant (`204`) |
 | `GET /admin/api/audit.csv?brain=&from=&to=` | | Download the audit log as CSV |
 
-Errors answer `{"error": "invalid" | "not_found" | "conflict" | "forbidden", "message"}`
-with `400`, `404`, `409` or `403`.
+Errors are always JSON, never a stack trace: `{"error": "invalid" |
+"not_found" | "conflict" | "forbidden", "message"}` with `400`, `404`, `409`
+or `403`; a malformed JSON body is `400 invalid`, a body over 16 KB `413
+{"error": "too_large"}`, and an unexpected failure `500 {"error":
+"internal"}` (the detail goes to the gateway log only).
+
+The CSV download streams with backpressure and holds at most 100 000 rows:
+a larger match is refused with `400` (and audited) before anything is sent;
+narrow it with `from`/`to` (or `brain`), or use the CLI, which has no limit.
 
 What each operation does:
 
