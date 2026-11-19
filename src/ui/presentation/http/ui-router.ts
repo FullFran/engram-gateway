@@ -11,6 +11,8 @@ import { CsrfTokens } from './csrf.js';
 import { alertBox, renderBarePage, renderPage, securityHeaders } from './layout.js';
 import { auditContent } from './views/audit.js';
 import type { AuditFilterForm } from './views/audit.js';
+import { backupsContent } from './views/backups.js';
+import type { BackupsView } from './views/backups.js';
 import { brainHealthContent, brainsContent } from './views/brains.js';
 import { connectionsContent } from './views/connections.js';
 import { serviceAccountsContent } from './views/service-accounts.js';
@@ -396,6 +398,19 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
     }
     const csvHref = `/admin/api/audit.csv${csv.size > 0 ? `?${csv}` : ''}`;
     send(res, error ? 400 : 200, 'Audit log', '/ui/audit', auditContent({ form, rows, olderHref, csvHref, ...(error ? { error } : {}) }));
+  });
+
+  // Slot: /ui/proposals (curated wiki, #16) goes here, calling the wiki's own use cases.
+
+  // Backups (#9): run now is admin only and audited as backup.run (D3)
+  const sendBackups = (res: Response, status: number, extra: Partial<BackupsView> = {}) =>
+    adminPage(res, 'Backups', '/ui/backups', () => backupsContent({ csrf: ctx(res).csrf, status: options.admin.backupStatus(actor(res)), ...extra }), status);
+  router.get('/backups', (_req, res) => sendBackups(res, 200));
+  router.post('/backups/run', (_req, res, next) => {
+    options.admin.runBackup(actor(res)).then(report => sendBackups(res, 200, { report }), error => {
+      if (!(error instanceof AdminError)) throw error;
+      sendBackups(res, ADMIN_STATUS[error.code], { error: error.message });
+    }).catch(next);
   });
 
   router.use((_req, res) => {

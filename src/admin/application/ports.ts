@@ -1,3 +1,4 @@
+import type { BackupReport, DailySchedule } from '../../backup/index.js';
 import type { BrainHealthLookup } from '../../health/index.js';
 import type { AuditEvent, AuditFilter, AuditQuery, AuditRecord } from '../../audit/index.js';
 import type { Role } from '../../authz/index.js';
@@ -76,4 +77,15 @@ export interface AdminTokens {
 /** A brain's health report (#18): the admin layer authorizes and audits reading it. */
 export interface AdminBrainHealth {
   report(brain: string): BrainHealthLookup;
+}
+
+/** The running gateway's backups (#9); absent without BACKUP_DIR. */
+export interface AdminBackups {
+  schedule: DailySchedule | 'off';
+  /** Snapshots kept per unit. */
+  retention: number;
+  /** Snapshot ids by unit (`gateway`, `brains/<slug>`), oldest first. */
+  snapshots(): Record<string, string[]>;
+  /** One snapshot of every unit; runs after any run already in progress. */
+  runAll(): Promise<BackupReport>;
 }

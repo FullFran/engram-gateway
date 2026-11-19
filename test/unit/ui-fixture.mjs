@@ -22,7 +22,8 @@ const quiet = Object.fromEntries(['debug', 'info', 'warn', 'error'].map(level =>
 const ORIGIN = 'http://gateway.test';
 
 /** `dev`: writer on alpha, reader on beta. `boss`: instance admin. */
-export function uiSetup(t) {
+/** `backups: false`: a gateway without BACKUP_DIR. */
+export function uiSetup(t, { backups: withBackups = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'engram-gateway-ui-'));
   const db = openGatewayDatabase(join(dir, 'gateway.db'));
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
@@ -53,11 +54,21 @@ export function uiSetup(t) {
       return reports.get(brain);
     }
   };
+  /** Backups (#9): a schedule, two units with snapshots; `nextReport` is what the next run returns. */
+  const backups = {
+    runs: 0,
+    schedule: { hour: 3, minute: 0 },
+    retention: 7,
+    nextReport: { taken: [{ unit: 'gateway', id: '20261119T030000000Z', files: ['gateway.db'] }], skipped: [], failed: [] },
+    snapshots: () => ({ gateway: ['20261117T030000000Z', '20261118T030000000Z'], 'brains/alpha': ['20261118T030000000Z'] }),
+    async runAll() { this.runs += 1; return this.nextReport; }
+  };
   const admin = new AdminService({
     store: new SqliteAdminStore(db), dirs: fsBrainDirectories(join(dir, 'brains')), clock, runtime, health,
-    tokens: adminPatPort(pats, clock)
+    tokens: adminPatPort(pats, clock),
+    ...(withBackups ? { backups } : {})
   });
-  return { db, dir, grants, clock, connections, pats, audit, runtime, reports, admin };
+  return { db, dir, grants, clock, connections, pats, audit, runtime, reports, admin, backups };
 }
 
 /**

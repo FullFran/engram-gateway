@@ -6,7 +6,8 @@ import type { AdminActor } from '../domain/admin-actor.js';
 import { AdminError } from '../domain/admin-error.js';
 import type { BrainView, GrantView, ServiceAccountView, UserView } from '../domain/views.js';
 import type { BrainHealthReport } from '../../health/index.js';
-import type { AdminBrainHealth, AdminClock, AdminStore, AdminTokens, BrainDirectories, BrainRuntime } from './ports.js';
+import type { BackupReport, DailySchedule } from '../../backup/index.js';
+import type { AdminBackups, AdminBrainHealth, AdminClock, AdminStore, AdminTokens, BrainDirectories, BrainRuntime } from './ports.js';
 
 export interface AdminServiceDeps {
   store: AdminStore;
@@ -16,6 +17,8 @@ export interface AdminServiceDeps {
   runtime?: BrainRuntime;
   /** Personal access tokens of service accounts (#7); without it those operations are refused. */
   tokens?: AdminTokens;
+  /** Backups (#9); without it (no BACKUP_DIR, or the CLI) a run is refused. */
+  backups?: AdminBackups;
   /** Brain health reports (#18); without it (CLI) they are refused. */
   health?: AdminBrainHealth;
   /**
@@ -44,6 +47,13 @@ const AUDIT_OUTCOMES: readonly string[] = ['ok', 'error', 'denied'];
 const AUDIT_ACTION = /^[a-z][a-z0-9_.]{0,63}$/;
 export const AUDIT_PAGE_DEFAULT = 50;
 export const AUDIT_PAGE_MAX = 200;
+
+/** What the panel shows of backups: the schedule, the retention and each unit's snapshots. */
+export interface BackupStatus {
+  schedule: DailySchedule | 'off';
+  retention: number;
+  units: { unit: string; count: number; latest: string }[];
+}
 
 export interface ExportOptions {
   /** Refuse an export matching more rows than this (the HTTP API sets it; the CLI does not). */
@@ -319,6 +329,43 @@ export class AdminService {
     const more = rows.length > size;
     const page = more ? rows.slice(0, size) : rows;
     return { rows: page, nextBefore: more ? page[page.length - 1]!.id : null };
+  }
+
+  // ---- Backups (#9) ----
+
+  /** Null when backups are not enabled. */
+  backupStatus(actor: AdminActor): BackupStatus | null {
+    this.authorize(actor, { action: 'backup.status', brain: null, target: null });
+    const backups = this.deps.backups;
+    if (!backups) return null;
+    const units = Object.entries(backups.snapshots()).map(([unit, ids]) => ({ unit, count: ids.length, latest: ids[ids.length - 1]! }));
+    return { schedule: backups.schedule, retention: backups.retention, units };
+  }
+
+  /**
+   * Backs up every unit now, in this process (after a run already in
+   * progress). Audited as `backup.run`: `ok`, or `error` when a unit failed;
+   * the meta holds how many units were taken, skipped and failed.
+   */
+  async runBackup(actor: AdminActor): Promise<BackupReport> {
+    const op = { action: 'backup.run', brain: null, target: null };
+    this.authorize(actor, op);
+    const startedAtMs = this.deps.clock.nowMs();
+    const backups = this.deps.backups;
+    if (!backups) {
+      this.record(actor, op, 'error', startedAtMs, { errorKind: 'invalid' });
+      throw new AdminError('invalid', 'backups are not enabled: set BACKUP_DIR');
+    }
+    let report: BackupReport;
+    try {
+      report = await backups.runAll();
+    } catch (error) {
+      this.record(actor, op, 'error', startedAtMs, { errorKind: 'internal' });
+      throw error;
+    }
+    const counts = { taken: report.taken.length, skipped: report.skipped.length, failed: report.failed.length };
+    this.record(actor, op, report.failed.length === 0 ? 'ok' : 'error', startedAtMs, counts);
+    return report;
   }
 
   /** The audit log as CSV lines (header first), streamed; the export itself is audited. */

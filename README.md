@@ -658,6 +658,7 @@ or a personal access token never opens it. With auth off there is no panel.
 | `/ui/service-accounts` | instance admins | Service accounts (#7) with status and owner; create one (you become its owner). Audited as `service_account.create` |
 | `/ui/service-accounts/<login>` | instance admins | The account's personal access tokens: create one on the brains it holds a grant on (the secret is shown once), revoke one. Its grants and disabling it are on its `/ui/users/<login>` page |
 | `/ui/audit` | instance admins | The audit log, newest first, 50 entries a page: filter by brain, action, actor, outcome and UTC dates; a link downloads the CSV export (`/admin/api/audit.csv`) of the same brain and dates |
+| `/ui/backups` | instance admins | Backups (with `BACKUP_DIR`): the schedule, the retention, each unit's snapshots; "Run now" backs up every unit in the gateway (after a run in progress) and shows the report. Audited as `backup.run` (`error` when a unit failed). Restore stays a CLI command |
 | `/ui/connections` | every signed-in user | Your OAuth connections (one per MCP client you approved): their brains, roles and effective roles; attach a brain (with at most your own grant, optionally as the default) or detach one. Audited as `connection.attach` / `connection.detach` |
 | `/ui/tokens` | every signed-in user | Your personal access tokens: create (the secret is shown once), list, revoke |
 

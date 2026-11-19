@@ -13,12 +13,17 @@ export const ACCOUNT_NAV: readonly NavItem[] = [
   { path: '/ui/tokens', label: 'My tokens' }
 ];
 
-/** Pages for instance admins only; the services refuse anyone else anyway. */
+/**
+ * Pages for instance admins only; the services refuse anyone else anyway.
+ * Slot: `/ui/proposals` (reviewing curated wiki proposals, #16) joins this
+ * list, with its routes in the router, once the wiki's use cases exist.
+ */
 export const ADMIN_NAV: readonly NavItem[] = [
   { path: '/ui/brains', label: 'Brains' },
   { path: '/ui/users', label: 'Users' },
   { path: '/ui/service-accounts', label: 'Service accounts' },
-  { path: '/ui/audit', label: 'Audit log' }
+  { path: '/ui/audit', label: 'Audit log' },
+  { path: '/ui/backups', label: 'Backups' }
 ];
 
 /** What every page shows around its content. */

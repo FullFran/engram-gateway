@@ -60,6 +60,10 @@ test('axe: every panel page and state has no violation', async t => {
   pages['audit log'] = await call('/ui/audit?limit=3', { as: 'boss' });
   pages['audit log, nothing matches'] = await call('/ui/audit?action=nothing.here', { as: 'boss' });
   pages['audit log, bad filter'] = await call('/ui/audit?from=yesterday', { as: 'boss' });
+  pages['backups'] = await call('/ui/backups', { as: 'boss' });
+  pages['backups, run'] = await call('/ui/backups/run', { as: 'boss', method: 'POST', form: { csrf: bossCsrf } });
+  s.backups.nextReport = { taken: [], skipped: [{ unit: 'brains/beta', reason: 'busy' }], failed: [{ unit: 'gateway', error: 'disk full' }] };
+  pages['backups, run with failures'] = await call('/ui/backups/run', { as: 'boss', method: 'POST', form: { csrf: bossCsrf } });
   pages['not found'] = await call('/ui/nope', { as: 'dev' });
   pages['form refused'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { name: 'x' } });
   pages['signed out'] = await call('/ui/tokens', { method: 'POST', form: { name: 'x' } });

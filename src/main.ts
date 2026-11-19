@@ -20,6 +20,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { AdminService, SqliteAdminStore, createAdminRouter, fsBrainDirectories } from './admin/index.js';
+import type { AdminBackups } from './admin/index.js';
 import { SqliteAuthorshipRepository, createAttributor } from './attribution/index.js';
 import { ANONYMOUS_ACTOR, SqliteAuditLog, toolCallRecorder } from './audit/index.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
@@ -188,6 +189,8 @@ async function main(): Promise<void> {
   registry.startReaper();
 
   let backups: { stop(): Promise<void> } | undefined;
+  // What the web panel (#17) shows and runs: the same service as the schedule and the CLI socket.
+  let adminBackups: AdminBackups | undefined;
   if (backupConfig.enabled) {
     mkdirSync(backupConfig.dir, { recursive: true, mode: 0o700 });
     // mkdirSync's mode does not apply to an existing directory.
@@ -224,6 +227,7 @@ async function main(): Promise<void> {
     });
     const schedule = backupConfig.schedule === 'off' ? undefined : startBackupSchedule(() => service.runAll(), backupConfig.schedule, backupConfig.jitterMs, logger);
     backups = { stop: async () => { schedule?.stop(); await control?.close(); } };
+    adminBackups = { schedule: backupConfig.schedule, retention: backupConfig.retention, snapshots: () => service.listAll(), runAll: () => service.runAll() };
   }
 
   // One admin service (#10) for the JSON API and the web panel (#17).
@@ -233,7 +237,8 @@ async function main(): Promise<void> {
     clock: { nowMs: () => Date.now() },
     runtime: registry,
     tokens: adminPatPort(pats, { nowMs: () => Date.now() }),
-    health
+    health,
+    ...(adminBackups ? { backups: adminBackups } : {})
   });
 
   const app = createGatewayApp({
