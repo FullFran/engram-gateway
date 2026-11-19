@@ -15,6 +15,12 @@ test('axe: every panel page and state has no violation', async t => {
   pages['my tokens, created'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { csrf, name: 'ci', brains: 'alpha', scope: 'read', expires: '30' } });
   pages['my tokens, refused'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { csrf, name: 'x', brains: 'beta', scope: 'read+write', expires: '30' } });
   pages['my tokens, as an admin'] = await call('/ui/tokens', { as: 'boss' });
+  pages['my connections, none'] = await call('/ui/connections', { as: 'dev' });
+  const mine = s.connections.saveOAuth('dev', 'client-a', { name: 'Claude', defaultBrain: 'alpha', brains: [{ brain: 'alpha', role: 'reader' }] });
+  s.connections.saveOAuth('dev', 'client-b', { name: 'Empty', defaultBrain: 'alpha', brains: [{ brain: 'alpha', role: 'reader' }] });
+  s.connections.detach(s.connections.findOAuth('dev', 'client-b').id, 'alpha');
+  pages['my connections, two'] = await call('/ui/connections', { as: 'dev' });
+  pages['my connections, refused'] = await call(`/ui/connections/${mine}/attach`, { as: 'dev', method: 'POST', form: { csrf, brain: 'beta', role: 'owner' } });
   pages['not found'] = await call('/ui/nope', { as: 'dev' });
   pages['form refused'] = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { name: 'x' } });
   pages['signed out'] = await call('/ui/tokens', { method: 'POST', form: { name: 'x' } });

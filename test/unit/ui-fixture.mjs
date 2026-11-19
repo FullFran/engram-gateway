@@ -12,7 +12,7 @@ import { SqliteAuditLog } from '../../dist/audit/index.js';
 import { HttpRequestAuthenticator } from '../../dist/auth/index.js';
 import { SqliteGrantRepository, bootstrapAccess } from '../../dist/authz/index.js';
 import { SqliteBrainRepository } from '../../dist/brains/index.js';
-import { PersonalAccessTokens, SqliteConnectionStore, SqlitePatStore, nodePatSecrets, patIdentityProvider } from '../../dist/connections/index.js';
+import { OwnConnections, PersonalAccessTokens, SqliteConnectionStore, SqlitePatStore, nodePatSecrets, patIdentityProvider } from '../../dist/connections/index.js';
 import { createGatewayApp } from '../../dist/http/app.js';
 import { createUiRouter } from '../../dist/ui/index.js';
 import { openGatewayDatabase } from '../../dist/shared/gateway-database.js';
@@ -63,6 +63,7 @@ export async function uiApp(t, s) {
       identify, origin: ORIGIN, logger: quiet, clock: s.clock,
       isAdmin: login => s.grants.isAdmin(login),
       tokens: s.pats,
+      connections: new OwnConnections({ store: s.connections, grants: s.grants, clock: s.clock }),
       brainsOf: login => s.grants.grantsOf(login)
     })
   });

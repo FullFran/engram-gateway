@@ -651,6 +651,7 @@ or a personal access token never opens it. With auth off there is no panel.
 
 | Page | Who | What |
 |------|-----|------|
+| `/ui/connections` | every signed-in user | Your OAuth connections (one per MCP client you approved): their brains, roles and effective roles; attach a brain (with at most your own grant, optionally as the default) or detach one. Audited as `connection.attach` / `connection.detach` |
 | `/ui/tokens` | every signed-in user | Your personal access tokens: create (the secret is shown once), list, revoke |
 
 Every action calls the same application services as the admin and account
