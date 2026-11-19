@@ -402,6 +402,28 @@ async function checkAdmin(github) {
     assertEqual((await request(base, { method: 'POST', path: '/mcp/gamma', json: {} })).status, 401, 'gamma is served (auth required) without a restart');
     ok('a brain created through the API is served without a restart');
 
+    // --- #43: the per-brain side state follows the brains table, not the startup list ---
+    const gammaPat = await request(base, { method: 'POST', path: '/account/api/tokens', headers: { ...session, origin: base }, json: { name: 'gamma-write', brains: ['gamma'], scope: 'read+write', expiresInDays: 30 } });
+    assertEqual(gammaPat.status, 201, `create a PAT on gamma (${gammaPat.text.slice(0, 200)})`);
+    const gammaSaved = await mcpCall(base, '/mcp/gamma', 'mem_save', { title: 'gamma-first', content: 'first memory of a runtime brain', type: 'discovery' }, bearer(gammaPat.body.token));
+    assert(gammaSaved.result?.result && !gammaSaved.result.result.isError, `a PAT saves to gamma: ${gammaSaved.text.slice(0, 300)}`);
+    const gammaHealth = await fetch(`${base}/admin/brains/gamma/health`, { headers: session });
+    const gammaReport = await gammaHealth.json();
+    assertEqual(gammaHealth.status, 200, `the admin health endpoint reports on a brain created at runtime (${JSON.stringify(gammaReport).slice(0, 200)})`);
+    assertEqual(gammaReport.brain, 'gamma', 'the health report is gamma\'s');
+    assert(gammaReport.observations?.live >= 1, `gamma's report counts the saved memory: ${JSON.stringify(gammaReport.observations)}`);
+    // The running gateway holds gamma's brain lock: an offline restore is refused.
+    const gammaLock = new DatabaseSync(join(brainsRoot, 'gamma', '.gateway.lock'));
+    try {
+      gammaLock.exec('PRAGMA busy_timeout = 0');
+      let refused = false;
+      try { gammaLock.exec('BEGIN EXCLUSIVE'); } catch (error) { refused = /locked|BUSY/i.test(error.message); }
+      assert(refused, 'the gateway holds the lock of a brain created at runtime');
+    } finally {
+      gammaLock.close();
+    }
+    ok('a brain created at runtime gets a health report and its brain lock without a restart (#43)');
+
     // --- restart: the API grant survives; gamma gets its OAuth resource ---
     await gateway.stop();
     gateway = await startGateway(scratch, env);
