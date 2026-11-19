@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { formDefaults } from './lib/harness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, '..');
@@ -309,14 +310,15 @@ async function authorize(base, { clientId, redirectUri, challenge, method = 'S25
   return { first, path };
 }
 
-async function consent(base, jar, consentPage, decision = 'approve', origin = base) {
+async function consent(base, jar, consentPage, decision = 'approve', origin = base, choices = {}) {
   const ticket = /name="ticket" value="([^"]+)"/.exec(consentPage.text)?.[1];
   assert(ticket, `consent page carries a ticket: ${consentPage.text.slice(0, 300)}`);
   return request(base, {
     method: 'POST',
     path: '/oauth/authorize',
     headers: { cookie: cookieHeader(jar), ...(origin ? { origin } : {}) },
-    form: { ticket: ticket.replace(/&amp;/g, '&'), decision }
+    // As a browser submits it: every field the page renders (the connection picker included), then the choice.
+    form: { ...formDefaults(consentPage.text), ...choices, decision }
   });
 }
 

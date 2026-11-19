@@ -8,6 +8,7 @@ import express from 'express';
 import type { DatabaseSync } from 'node:sqlite';
 import { StaticAccessPolicy } from './application/identity.js';
 import type { AccessPolicy } from './application/identity.js';
+import type { ConnectionConsent } from './application/connection-consent.js';
 import type { AuthSettings } from './application/settings.js';
 import type { Logger } from './application/ports.js';
 import type { AuthOnConfig } from './infrastructure/env-config.js';
@@ -27,6 +28,9 @@ export type { AuthConfig, AuthOnConfig, AuthOffConfig } from './infrastructure/e
 export { HttpRequestAuthenticator } from './presentation/http/request-authenticator.js';
 export type { Authentication, Principal, CredentialHeaders, AuthenticateOptions } from './presentation/http/request-authenticator.js';
 export type { AccessPolicy, Identity, IdentityProvider } from './application/identity.js';
+export type {
+  ConnectionAcceptance, ConnectionAnswer, ConnectionConsent, ConnectionOffer, ConsentBrain, ConsentClient
+} from './application/connection-consent.js';
 export type { AuthPluginDefinition } from './plugins/types.js';
 export { AUTH_PLUGINS } from './plugins/registry.js';
 
@@ -51,6 +55,8 @@ export interface AuthDeps {
   policy?: AccessPolicy;
   /** The gateway database, opened (and closed) by the caller; default: opens `config.dbPath`. */
   db?: DatabaseSync;
+  /** Turns grants on the multi-brain endpoint into connections (#27); default: none, every grant is a plain token. */
+  connections?: ConnectionConsent;
 }
 
 /** Without the GitHub provider there is no OAuth discovery to point at. */
@@ -75,6 +81,7 @@ export function buildAuth(config: AuthOnConfig, deps: AuthDeps): AuthModule {
     signer: new HmacTicketSigner(config.secret.secret(), clock),
     store: new SqliteTokenStore(db, clock, random),
     cookies, clock, random, hasher: sha256Hasher, logger: deps.logger, policy,
+    ...(deps.connections ? { connections: deps.connections } : {}),
     ...(deps.cimdFetch ? { fetchOptions: deps.cimdFetch } : {}),
     resourceName: deps.resourceName ?? 'Engram memory'
   };

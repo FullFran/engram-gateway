@@ -20,6 +20,8 @@ export interface Identity {
   /** Audience the bearer was issued for. */
   resource?: string;
   token?: string;
+  /** The connection (#27) the bearer was issued for; absent for a single-brain token. */
+  connectionId?: number;
 }
 
 /** What a request wants to reach. */

@@ -7,7 +7,7 @@ export const AUTHORS_META_KEY = 'engram-gateway/authors';
 
 /** One forwarded call as the pipeline's attribution stage describes it (structurally; this module does not import the pipeline). */
 export interface AttributionInput<R extends AttributedResult> {
-  caller?: { login?: string };
+  caller?: { login?: string; connectionId?: number };
   brain: string | null;
   request: { name: string; arguments?: Record<string, unknown> };
   result: R;
@@ -53,7 +53,8 @@ export function createAttributor(opts: AttributorOptions) {
       const written = writtenObservation(kind, result);
       if (!written) return { result, counts: { skipped_no_id: 1 } };
       opts.authors.recordWrite({
-        brain, observationId: written.id, ...(written.syncId ? { syncId: written.syncId } : {}), login, kind, atMs: opts.clock.nowMs()
+        brain, observationId: written.id, ...(written.syncId ? { syncId: written.syncId } : {}), login,
+        ...(input.caller?.connectionId !== undefined ? { connectionId: input.caller.connectionId } : {}), kind, atMs: opts.clock.nowMs()
       });
       return { result, counts: { recorded: 1 } };
     }

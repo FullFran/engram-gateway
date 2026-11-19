@@ -23,7 +23,8 @@ export class GitHubProvider implements IdentityProvider {
       kind: 'ok',
       identity: {
         provider: this.id, subject: record.login, via: 'bearer', clientId: record.clientId, scopes: record.scope.split(' '),
-        expiresAt: record.expiresAt, resource: record.resource, token
+        expiresAt: record.expiresAt, resource: record.resource, token,
+        ...(record.connectionId !== undefined ? { connectionId: record.connectionId } : {})
       }
     };
   }

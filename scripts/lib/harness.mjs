@@ -227,8 +227,37 @@ export async function githubLogin(base, github, login, returnTo = '/') {
   return { poll, jar: name ? { [name]: merged[name] } : null };
 }
 
-/** DCR client + authorize/consent/token for `resource` (undefined: the default `/mcp`). */
-export async function obtainToken(base, jar, resource) {
+const unescapeHtml = value => value.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+/**
+ * The fields a browser submits for the consent form as rendered: hidden and
+ * text inputs, each select's selected option (else its first), the checked
+ * radio. The connection picker (#27) is submitted as the page preselects it.
+ */
+export function formDefaults(html) {
+  const form = {};
+  for (const [, tag] of html.matchAll(/<input\b([^>]*)>/g)) {
+    const name = /\bname="([^"]*)"/.exec(tag)?.[1];
+    const value = /\bvalue="([^"]*)"/.exec(tag)?.[1] ?? '';
+    const type = /\btype="([^"]*)"/.exec(tag)?.[1] ?? 'text';
+    if (!name || type === 'submit') continue;
+    if (type === 'radio' && !/\bchecked\b/.test(tag)) continue;
+    form[unescapeHtml(name)] = unescapeHtml(value);
+  }
+  for (const [, attrs, body] of html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/g)) {
+    const name = /\bname="([^"]*)"/.exec(attrs)?.[1];
+    const options = [...body.matchAll(/<option\b([^>]*)>/g)].map(([, o]) => ({ value: /\bvalue="([^"]*)"/.exec(o)?.[1] ?? '', selected: /\bselected\b/.test(o) }));
+    const pick = options.find(o => o.selected) ?? options[0];
+    if (name && pick) form[unescapeHtml(name)] = unescapeHtml(pick.value);
+  }
+  return form;
+}
+
+/**
+ * DCR client + authorize/consent/token for `resource` (undefined: the default `/mcp`).
+ * `choices`: consent form fields overriding the page's defaults (e.g. `{ 'role:alpha': 'reader' }`).
+ */
+export async function obtainToken(base, jar, resource, choices = {}) {
   const redirectUri = 'http://127.0.0.1:43123/callback';
   const registration = await request(base, { method: 'POST', path: '/oauth/register', json: { client_name: 'Gateway check', redirect_uris: [redirectUri], token_endpoint_auth_method: 'none' } });
   assertEqual(registration.status, 201, `DCR (${registration.text})`);
@@ -238,9 +267,10 @@ export async function obtainToken(base, jar, resource) {
   if (resource) params.set('resource', resource);
   const page = await request(base, { path: `/oauth/authorize?${params}`, headers: { cookie: cookieHeader(jar) } });
   if (page.status !== 200) return { page };
-  const ticket = /name="ticket" value="([^"]+)"/.exec(page.text)?.[1];
-  const decided = await request(base, { method: 'POST', path: '/oauth/authorize', headers: { cookie: cookieHeader(jar), origin: base }, form: { ticket: ticket.replace(/&amp;/g, '&'), decision: 'approve' } });
+  const decided = await request(base, { method: 'POST', path: '/oauth/authorize', headers: { cookie: cookieHeader(jar), origin: base }, form: { ...formDefaults(page.text), decision: 'approve', ...choices } });
+  if (decided.status !== 303) return { page, decided };
   const code = new URL(decided.headers.location).searchParams.get('code');
+  if (!code) return { page, decided };
   const exchange = await request(base, {
     method: 'POST', path: '/oauth/token',
     form: { grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: clientId, code_verifier: verifier, ...(resource ? { resource } : {}) }

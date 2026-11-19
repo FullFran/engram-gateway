@@ -36,7 +36,7 @@ export function recordToolCall(log: AuditLog, clock: AuditClock, call: ToolCallA
 
 /** A finished tool call as the pipeline's audit stage describes it (structurally; audit does not import the pipeline). */
 export interface ToolCallFacts {
-  caller?: { login?: string; clientId?: string };
+  caller?: { login?: string; clientId?: string; connectionId?: number };
   brain: string | null;
   tool: string;
   startedAtMs: number;
@@ -55,9 +55,12 @@ export function toolCallRecorder(log: AuditLog, clock: AuditClock): (facts: Tool
     const actor: AuditActor = login
       ? { kind: 'user', login, ...(facts.caller?.clientId !== undefined ? { clientId: facts.caller.clientId } : {}) }
       : ANONYMOUS_ACTOR;
+    // The connection (#27) the call came through is kept with the row, as an id.
+    const connectionId = facts.caller?.connectionId;
+    const meta = connectionId !== undefined ? { ...facts.meta, connectionId } : facts.meta;
     return recordToolCall(log, clock, {
       actor, brain: facts.brain, tool: facts.tool, startedAtMs: facts.startedAtMs, outcome: facts.outcome,
-      ...(facts.errorKind ? { errorKind: facts.errorKind } : {}), meta: facts.meta
+      ...(facts.errorKind ? { errorKind: facts.errorKind } : {}), meta
     });
   };
 }

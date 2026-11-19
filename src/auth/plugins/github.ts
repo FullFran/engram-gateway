@@ -86,7 +86,7 @@ export const githubPlugin: AuthPluginDefinition<GitHubPluginConfig> = {
       clients,
       policy,
       deviceSignIn: new DeviceSignIn(settings, new GitHubDeviceFlow(config), signer, random, clock, logger, store, policy),
-      authorization: new AuthorizationService(settings, clients, sessions, codes, signer, random, clock, store, policy),
+      authorization: new AuthorizationService(settings, clients, sessions, codes, signer, random, clock, store, policy, context.connections),
       tokens: new TokenService(settings, store, clients, codes, hasher, random, clock, logger, policy),
       ...(config.appName ? { appName: config.appName } : {}),
       resourceName: context.resourceName

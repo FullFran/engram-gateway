@@ -15,7 +15,7 @@ export type { AccessSnapshot, GrantReader, GrantStore } from './application/port
 export { bootstrapAccess } from './application/bootstrap.js';
 export type { AccessConfig } from './application/bootstrap.js';
 export { createToolAccess } from './application/tool-access.js';
-export type { AccessCheck, Caller, ToolAccess } from './application/tool-access.js';
+export type { AccessCheck, Caller, ConnectionRoles, ToolAccess } from './application/tool-access.js';
 export { GrantAccessPolicy } from './application/grant-access-policy.js';
 export { parseAdminLogins, parseBrainGrants } from './infrastructure/env-config.js';
 export { SqliteGrantRepository } from './infrastructure/sqlite-grant-repository.js';

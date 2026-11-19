@@ -21,15 +21,17 @@ export class SqliteAuthorshipRepository implements AuthorshipRepository {
     const user = userId(this.db, write.login);
     const createsAuthor = write.kind === 'save';
     this.db.prepare(
-      `INSERT INTO observation_authors (brain_id, observation_id, sync_id, user_id, last_writer_id, first_written_at, last_written_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO observation_authors (brain_id, observation_id, sync_id, user_id, last_writer_id, first_written_at, last_written_at, connection_id, last_connection_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (brain_id, observation_id) DO UPDATE SET
          sync_id = coalesce(excluded.sync_id, sync_id),
          last_writer_id = excluded.last_writer_id,
-         last_written_at = excluded.last_written_at`
+         last_written_at = excluded.last_written_at,
+         last_connection_id = excluded.last_connection_id`
     ).run(
       write.brain, write.observationId, write.syncId ?? null,
-      createsAuthor ? user : null, user, createsAuthor ? write.atMs : null, write.atMs
+      createsAuthor ? user : null, user, createsAuthor ? write.atMs : null, write.atMs,
+      createsAuthor ? write.connectionId ?? null : null, write.connectionId ?? null
     );
   }
 

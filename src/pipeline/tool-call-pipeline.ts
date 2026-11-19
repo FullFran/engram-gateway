@@ -47,6 +47,8 @@ export interface ToolCallContext {
 export interface ToolCaller {
   login?: string;
   clientId?: string;
+  /** The connection (#27) the call came through; absent for a single-brain token. */
+  connectionId?: number;
 }
 
 /** Facts about one call that are not part of the request: who, which brain, when it started. */

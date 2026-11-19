@@ -12,7 +12,8 @@ import type { AuthSettings } from '../../application/settings.js';
 import type { TokenService } from '../../application/tokens.js';
 import type { AccessPolicy } from '../../application/identity.js';
 import { CookieJar, isSameOrigin, oauthError, rateLimit, single } from './http-helpers.js';
-import { sendConsentPage, sendDevicePage, sendDeviceScript, sendErrorPage, sendLoginPage } from './pages.js';
+import type { ConnectionAnswer } from '../../application/connection-consent.js';
+import { ROLE_FIELD_PREFIX, sendConsentPage, sendDevicePage, sendDeviceScript, sendErrorPage, sendLoginPage } from './pages.js';
 
 export interface OAuthRouterDeps {
   settings: AuthSettings;
@@ -230,7 +231,8 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
   router.post('/oauth/authorize', urlencoded, async (req, res, next) => {
     try {
       if (!isSameOrigin(req.headers, issuer)) return sendErrorPage(res, 403, 'Forbidden', 'Cross-site request rejected.');
-      const result = await authorization.decide(single(req.body?.ticket), single(req.body?.decision), cookies.read(req.headers.cookie, cookies.session));
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const result = await authorization.decide(single(body.ticket), single(body.decision), cookies.read(req.headers.cookie, cookies.session), connectionAnswer(body));
       if (result.kind === 'error_page') return sendErrorPage(res, result.status, result.title, result.message);
       sendRedirect(res, 303, result);
     } catch (error) {
@@ -282,4 +284,14 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
   });
 
   return router;
+}
+
+/** The consent form's connection fields (#27): `connection_name`, `default_brain` and one `role:<brain>` per brain. */
+function connectionAnswer(body: Record<string, unknown>): ConnectionAnswer {
+  const roles: Record<string, string> = {};
+  for (const [field, value] of Object.entries(body)) {
+    const role = single(value);
+    if (field.startsWith(ROLE_FIELD_PREFIX) && role !== undefined) roles[field.slice(ROLE_FIELD_PREFIX.length)] = role;
+  }
+  return { name: single(body.connection_name), defaultBrain: single(body.default_brain), roles };
 }

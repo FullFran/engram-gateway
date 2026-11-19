@@ -1,5 +1,6 @@
 import type express from 'express';
 import type { AccessPolicy, IdentityProvider } from '../application/identity.js';
+import type { ConnectionConsent } from '../application/connection-consent.js';
 import type { Clock, Hasher, Logger, RandomSource, TicketSigner, TokenStore } from '../application/ports.js';
 import type { AuthSettings } from '../application/settings.js';
 import type { Env } from '../infrastructure/config-error.js';
@@ -18,6 +19,8 @@ export interface AuthPluginContext {
   hasher: Hasher;
   logger: Logger;
   policy: AccessPolicy;
+  /** Turns grants on the multi-brain endpoint into connections (#27). */
+  connections?: ConnectionConsent;
   /** Options for fetching remote documents (tests inject a guard and CA). */
   fetchOptions?: SafeFetchOptions;
   resourceName: string;
