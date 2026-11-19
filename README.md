@@ -653,6 +653,8 @@ or a personal access token never opens it. With auth off there is no panel.
 |------|-----|------|
 | `/ui/brains` | instance admins | Every brain with its status and what the running gateway does with it (stopped, live and serving, live and idle); create a brain, archive one (not the default). Audited as `brain.create` / `brain.archive` |
 | `/ui/brains/<slug>` | instance admins | The brain's health report (#18): observations, types, noise, duplicate titles, pending relations, past review dates. Audited as `admin.brain_health` |
+| `/ui/users` | instance admins | Every user with status (invited, active, disabled) and kind; invite a GitHub login, disable or enable a user (not an instance admin). Audited as `user.invite` / `user.disable` / `user.enable` |
+| `/ui/users/<login>` | instance admins | The user's grants and where each comes from; set or change a role on an active brain, revoke a grant made in the panel or the API (grants from `BRAIN_GRANTS` are changed there). Audited as `grant.set` / `grant.revoke` |
 | `/ui/connections` | every signed-in user | Your OAuth connections (one per MCP client you approved): their brains, roles and effective roles; attach a brain (with at most your own grant, optionally as the default) or detach one. Audited as `connection.attach` / `connection.detach` |
 | `/ui/tokens` | every signed-in user | Your personal access tokens: create (the secret is shown once), list, revoke |
 

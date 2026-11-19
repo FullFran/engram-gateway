@@ -11,6 +11,7 @@ import { CsrfTokens } from './csrf.js';
 import { alertBox, renderBarePage, renderPage, securityHeaders } from './layout.js';
 import { brainHealthContent, brainsContent } from './views/brains.js';
 import { connectionsContent } from './views/connections.js';
+import { userGrantsContent, usersContent } from './views/users.js';
 import { tokensContent } from './views/tokens.js';
 import type { TokensView } from './views/tokens.js';
 
@@ -244,6 +245,47 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
   router.get('/brains/:slug', (req, res) => {
     const slug = req.params.slug ?? '';
     adminPage(res, 'Brain health', '/ui/brains', () => brainHealthContent(slug, options.admin.brainHealth(actor(res), slug)));
+  });
+
+  // Users and their grants (#10)
+  const sendUsers = (res: Response, status: number, extra: { error?: string; login?: string } = {}) =>
+    adminPage(res, 'Users', '/ui/users', () => usersContent({ csrf: ctx(res).csrf, users: options.admin.listUsers(actor(res)), ...extra }), status);
+  const userPath = (login: string) => `/ui/users/${encodeURIComponent(login)}`;
+  const sendUser = (res: Response, login: string, status: number, error?: string) =>
+    adminPage(res, 'User', '/ui/users', () => {
+      const user = options.admin.listUsers(actor(res)).find(row => row.login.toLowerCase() === login.toLowerCase());
+      if (!user) throw new AdminError('not_found', `unknown user ${JSON.stringify(login)}`);
+      return userGrantsContent({
+        csrf: ctx(res).csrf, user,
+        grants: options.admin.listGrants(actor(res), { login: user.login }),
+        brains: options.admin.listBrains(actor(res)).filter(brain => brain.status === 'active').map(brain => brain.slug),
+        ...(error ? { error } : {})
+      });
+    }, status);
+  const field = (req: Request, name: string) => text((req.body as Record<string, unknown> | undefined)?.[name]);
+
+  router.get('/users', (_req, res) => sendUsers(res, 200));
+  router.post('/users', (req, res, next) => {
+    const login = field(req, 'login').trim();
+    adminChange(res, '/ui/users', () => options.admin.inviteUser(actor(res), login), (status, error) => sendUsers(res, status, { error, login })).catch(next);
+  });
+  for (const action of ['disable', 'enable'] as const) {
+    router.post(`/users/:login/${action}`, (req, res, next) => {
+      const login = req.params.login ?? '';
+      const change = () => (action === 'disable' ? options.admin.disableUser(actor(res), login) : options.admin.enableUser(actor(res), login));
+      adminChange(res, '/ui/users', change, (status, error) => sendUsers(res, status, { error })).catch(next);
+    });
+  }
+  router.get('/users/:login', (req, res) => sendUser(res, req.params.login ?? '', 200));
+  router.post('/users/:login/grants', (req, res, next) => {
+    const login = req.params.login ?? '';
+    adminChange(res, userPath(login), () => options.admin.setGrant(actor(res), login, field(req, 'brain'), field(req, 'role')),
+      (status, error) => sendUser(res, login, status, error)).catch(next);
+  });
+  router.post('/users/:login/grants/:brain/revoke', (req, res, next) => {
+    const login = req.params.login ?? '';
+    adminChange(res, userPath(login), () => options.admin.revokeGrant(actor(res), login, req.params.brain ?? ''),
+      (status, error) => sendUser(res, login, status, error)).catch(next);
   });
 
   router.use((_req, res) => {
