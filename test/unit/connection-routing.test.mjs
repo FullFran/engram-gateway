@@ -251,13 +251,16 @@ test('a login runs at most maxFanOutsPerLogin fan-outs at once; one more is a to
   g.db.prepare("INSERT INTO connection_brains (connection_id, brain_id, role) SELECT ?, id, 'reader' FROM brains WHERE slug = 'slow'").run(g.connectionId);
   const client = await g.connect();
   const running = [1, 2].map(() => client.callTool({ name: 'mem_search', arguments: { brain: '*', text: 'q' } }));
+  let settled = false;
+  const bothDone = Promise.all(running).finally(() => { settled = true; });
   await new Promise(resolve => setTimeout(resolve, 300));
-  const started = Date.now();
   const third = await client.callTool({ name: 'mem_search', arguments: { brain: '*', text: 'q' } });
-  assert.ok(Date.now() - started < 700, 'refused without waiting');
+  // Ordering, not wall-clock time (a loaded machine made a 700 ms bound flaky):
+  // the refusal comes back while the two running fan-outs still hold their slots.
+  assert.equal(settled, false, 'refused without waiting for the running fan-outs');
   assert.equal(third.isError, true);
   assert.match(third.content.map(item => item.text).join(''), /Too many/);
-  for (const result of await Promise.all(running)) assert.ok(!result.isError);
+  for (const result of await bothDone) assert.ok(!result.isError);
   const after = await client.callTool({ name: 'mem_search', arguments: { brain: '*', text: 'q' } });
   assert.ok(!after.isError, 'the slots free up once the running fan-outs end');
 });
