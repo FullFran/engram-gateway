@@ -136,8 +136,15 @@ A brain is one data directory with its own `engram.db`, served by its own
 - **Lifecycle.** A brain's child starts on its first request and stops after
   `BRAIN_IDLE_TIMEOUT` seconds without requests. At most `MAX_LIVE_BRAINS`
   children run at once: a new brain stops the least recently used idle one,
-  or gets `503` when all are busy. The default brain is started once at
-  startup (so a missing `engram` fails fast), then reaped like any other.
+  or waits while one is still shutting down (shutting-down children count
+  against the cap, and a brain is never started again before its previous
+  child has exited), or gets `503` when all are busy. The default brain is
+  started once at startup (so a missing `engram` fails fast), then reaped
+  like any other.
+- **Restart cooldown.** After a child fails to start or exits unexpectedly,
+  its brain is not restarted for 1 s, doubling on each further failure up to
+  30 s (a child that ran for a minute resets the backoff). Meanwhile the
+  brain answers `503` with `Retry-After`.
   `GET /health/brains` answers `{"live": n, "idle": m}` (counts only).
   An idle child uses about 18-30 MB of RSS (engram 3.7.2).
 - **Child environment.** A child gets `ENGRAM_DATA_DIR` (its brain),
@@ -153,6 +160,14 @@ A brain is one data directory with its own `engram.db`, served by its own
   one brain is refused by every other one. The default brain accepts tokens
   for `/mcp` and `/mcp/default`. An unknown brain answers `404` before
   authentication, exactly like any unknown path.
+- **Brain names are not secret.** Anyone can tell whether a brain exists: a
+  known brain answers `401` with a `WWW-Authenticate` challenge to a request
+  without a token and serves protected-resource metadata, an unknown one
+  answers `404` to both. This is accepted (slugs are low-sensitivity); do not
+  put secrets in brain names. No endpoint lists the brains.
+- **Access.** Until per-brain grants land (#6), every login in
+  `ALLOWED_GITHUB_LOGINS` is trusted on every brain: any of them can obtain a
+  token for any brain.
 
 ### Upgrading to brains
 
@@ -167,6 +182,15 @@ syncing the existing memory, add:
 ```sh
 ENGRAM_CLOUD_BRAINS=default
 ```
+
+When any `ENGRAM_CLOUD_*` variable is set but `ENGRAM_CLOUD_BRAINS` is empty,
+the gateway logs a warning at startup naming those variables (never their
+values). Every brain listed in `ENGRAM_CLOUD_BRAINS` gets the same
+`ENGRAM_CLOUD_*` values, so opted-in brains share one set of cloud
+credentials.
+
+Until per-brain grants land (#6), every allowed GitHub login can use every
+brain.
 
 ### Gateway database
 

@@ -40,10 +40,14 @@ interface Entry<P> {
  * One Engram process per brain: created on the first request for that brain,
  * stopped after `idleTimeoutMs` without requests, bounded by `maxLiveBrains`
  * (least recently used idle brain evicted first). Requests in flight keep
- * their brain alive.
+ * their brain alive. A brain's process is only created again once its
+ * previous child has fully exited (never two children on one data
+ * directory), and children still closing count against `maxLiveBrains`.
  */
 export class BrainRegistry<P extends BrainProcess> {
   private readonly entries = new Map<string, Entry<P>>();
+  /** Brains whose child is shutting down, by slug: settles once it has exited. */
+  private readonly closing = new Map<string, Promise<void>>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
 
@@ -54,50 +58,57 @@ export class BrainRegistry<P extends BrainProcess> {
     return this.options.brains.has(slug);
   }
 
-  acquire(slug: string): BrainLease<P> {
-    if (this.stopped) throw new Error('brain registry is stopped');
-    const brain = this.options.brains.get(slug);
-    if (!brain) throw new Error(`unknown brain: ${slug}`);
-    let entry = this.entries.get(slug);
-    if (!entry) {
-      if (this.entries.size >= this.options.maxLiveBrains) this.makeRoom();
-      entry = { brain, process: this.options.createProcess(brain), inFlight: 0, lastUsedAt: this.options.clock.now() };
-      this.entries.set(slug, entry);
-    }
-    const current = entry;
-    current.inFlight += 1;
-    current.lastUsedAt = this.options.clock.now();
-    let released = false;
-    return {
-      process: current.process,
-      release: () => {
-        if (released) return;
-        released = true;
-        current.inFlight -= 1;
-        current.lastUsedAt = this.options.clock.now();
+  /**
+   * A lease on the brain's process, creating it when needed. Waits while the
+   * brain's previous child is closing, or while a slot frees up at capacity;
+   * rejects with `BrainCapacityError` when every slot is busy.
+   */
+  async acquire(slug: string): Promise<BrainLease<P>> {
+    for (;;) {
+      if (this.stopped) throw new Error('brain registry is stopped');
+      const brain = this.options.brains.get(slug);
+      if (!brain) throw new Error(`unknown brain: ${slug}`);
+      const existing = this.entries.get(slug);
+      if (existing) return this.lease(existing);
+      const previous = this.closing.get(slug);
+      if (previous) {
+        await previous;
+        continue;
       }
-    };
+      if (this.entries.size + this.closing.size >= this.options.maxLiveBrains) {
+        const victim = this.leastRecentlyUsedIdle();
+        if (victim) void this.evict(victim, 'evicted (MAX_LIVE_BRAINS)');
+        if (this.closing.size === 0) throw new BrainCapacityError(this.options.maxLiveBrains);
+        await Promise.race(this.closing.values());
+        continue;
+      }
+      const entry: Entry<P> = { brain, process: this.options.createProcess(brain), inFlight: 0, lastUsedAt: this.options.clock.now() };
+      this.entries.set(slug, entry);
+      return this.lease(entry);
+    }
   }
 
-  /** Stops every brain idle for at least the timeout. */
-  reap(): void {
+  /** Stops every brain idle for at least the timeout; settles once they have exited. */
+  async reap(): Promise<void> {
     const now = this.options.clock.now();
+    const stopping: Promise<void>[] = [];
     for (const [slug, entry] of this.entries) {
-      if (entry.inFlight === 0 && now - entry.lastUsedAt >= this.options.idleTimeoutMs) this.evict(slug, 'idle');
+      if (entry.inFlight === 0 && now - entry.lastUsedAt >= this.options.idleTimeoutMs) stopping.push(this.evict(slug, 'idle'));
     }
+    await Promise.all(stopping);
   }
 
   /** Runs `reap()` periodically; the timer never keeps the process alive. */
   startReaper(intervalMs = Math.max(1000, Math.min(30_000, Math.floor(this.options.idleTimeoutMs / 4)))): void {
     if (this.timer || this.stopped) return;
-    this.timer = setInterval(() => this.reap(), intervalMs);
+    this.timer = setInterval(() => void this.reap(), intervalMs);
     this.timer.unref();
   }
 
-  /** Brains with a running child, and how many of those have no request in flight. */
+  /** Children running (closing ones included), and how many of those serve no request. */
   stats(): { live: number; idle: number } {
-    let live = 0;
-    let idle = 0;
+    let live = this.closing.size;
+    let idle = this.closing.size;
     for (const entry of this.entries.values()) {
       if (!entry.process.live()) continue;
       live += 1;
@@ -106,12 +117,20 @@ export class BrainRegistry<P extends BrainProcess> {
     return { live, idle };
   }
 
-  /** Stops one brain's process (the next request starts a new one). */
+  /** Stops one brain's process; settles once its child has exited (the next request starts a new one). */
   async stop(slug: string): Promise<void> {
     const entry = this.entries.get(slug);
-    if (!entry) return;
+    if (!entry) return this.closing.get(slug);
     this.entries.delete(slug);
-    await entry.process.close();
+    const done: Promise<void> = entry.process.close()
+      .catch(error => {
+        this.options.logger.warn('Brain process did not stop cleanly', { brain: slug, error: (error as Error).message });
+      })
+      .finally(() => {
+        if (this.closing.get(slug) === done) this.closing.delete(slug);
+      });
+    this.closing.set(slug, done);
+    return done;
   }
 
   /** Stops every process and refuses further requests (shutdown). */
@@ -119,23 +138,35 @@ export class BrainRegistry<P extends BrainProcess> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    const closing = [...this.entries.keys()].map(slug => this.stop(slug));
-    await Promise.allSettled(closing);
+    for (const slug of [...this.entries.keys()]) void this.stop(slug);
+    await Promise.all([...this.closing.values()]);
   }
 
-  private makeRoom(): void {
-    let victim: [string, Entry<P>] | undefined;
-    for (const pair of this.entries) {
-      if (pair[1].inFlight === 0 && (!victim || pair[1].lastUsedAt < victim[1].lastUsedAt)) victim = pair;
+  private lease(entry: Entry<P>): BrainLease<P> {
+    entry.inFlight += 1;
+    entry.lastUsedAt = this.options.clock.now();
+    let released = false;
+    return {
+      process: entry.process,
+      release: () => {
+        if (released) return;
+        released = true;
+        entry.inFlight -= 1;
+        entry.lastUsedAt = this.options.clock.now();
+      }
+    };
+  }
+
+  private leastRecentlyUsedIdle(): string | undefined {
+    let victim: Entry<P> | undefined;
+    for (const entry of this.entries.values()) {
+      if (entry.inFlight === 0 && (!victim || entry.lastUsedAt < victim.lastUsedAt)) victim = entry;
     }
-    if (!victim) throw new BrainCapacityError(this.options.maxLiveBrains);
-    this.evict(victim[0], 'evicted (MAX_LIVE_BRAINS)');
+    return victim?.brain.slug;
   }
 
-  private evict(slug: string, reason: string): void {
+  private evict(slug: string, reason: string): Promise<void> {
     this.options.logger.info('Stopping brain process', { brain: slug, reason });
-    void this.stop(slug).catch(error => {
-      this.options.logger.warn('Brain process did not stop cleanly', { brain: slug, error: (error as Error).message });
-    });
+    return this.stop(slug);
   }
 }

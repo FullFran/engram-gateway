@@ -1,9 +1,10 @@
 // Tiny stdio MCP server used by the bridge unit tests.
-// FAKE_PID_FILE / FAKE_ENV_FILE: write the pid / the whole environment there on start.
+// FAKE_PID_FILE / FAKE_ENV_FILE: write the pid / the whole environment there on start;
+// FAKE_SPAWN_LOG: append one byte per start.
 // Tools: echo (ok), fail (isError), crash (exits the process), slow (never answers),
 // mem_save (returns the arguments it received, so tests can see what reached the server),
 // mem_search (returns `text` as stored memory, with structured content).
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { TOOLS } from './fake-tools.mjs';
 import { Server } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
@@ -28,6 +29,7 @@ const factory = () => {
 };
 
 if (process.env.FAKE_PID_FILE) writeFileSync(process.env.FAKE_PID_FILE, String(process.pid));
+if (process.env.FAKE_SPAWN_LOG) appendFileSync(process.env.FAKE_SPAWN_LOG, 'x');
 if (process.env.FAKE_ENV_FILE) writeFileSync(process.env.FAKE_ENV_FILE, JSON.stringify(process.env));
 serveStdio(factory);
 process.stdin.on('end', () => process.exit(0));

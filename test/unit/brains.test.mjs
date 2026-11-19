@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { openGatewayDatabase } from '../../dist/shared/gateway-database.js';
 import {
   BrainCapacityError, BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, brainDataDir, buildChildEnv,
-  parseBrainSlug, resolveBrainsConfig
+  cloudSyncWarning, parseBrainSlug, resolveBrainsConfig
 } from '../../dist/brains/index.js';
 import { createEngramBridge } from '../../dist/bridge/index.js';
 
@@ -49,6 +49,19 @@ test('config: invalid values fail loudly', () => {
   assert.throws(() => resolveBrainsConfig({ HOME: '/h', BRAIN_IDLE_TIMEOUT: '0' }), /BRAIN_IDLE_TIMEOUT/);
   assert.throws(() => resolveBrainsConfig({ HOME: '/h', MAX_LIVE_BRAINS: 'many' }), /MAX_LIVE_BRAINS/);
   assert.throws(() => resolveBrainsConfig({ HOME: '/h', ENGRAM_CLOUD_BRAINS: 'BAD' }), /ENGRAM_CLOUD_BRAINS/);
+});
+
+test('config: a startup warning when ENGRAM_CLOUD_* is set but no brain opted in', () => {
+  const env = { HOME: '/h', ENGRAM_CLOUD_TOKEN: 't', ENGRAM_CLOUD_SERVER: 'https://cloud.example' };
+  const warning = cloudSyncWarning(env, resolveBrainsConfig(env));
+  assert.match(warning, /ENGRAM_CLOUD_SERVER, ENGRAM_CLOUD_TOKEN/);
+  assert.match(warning, /ENGRAM_CLOUD_BRAINS/);
+  assert.match(warning, /ENGRAM_CLOUD_BRAINS=default/);
+  assert.equal(warning.includes('https://cloud.example') || warning.includes("'t'"), false, 'never prints values');
+  assert.equal(cloudSyncWarning({ HOME: '/h' }, resolveBrainsConfig({ HOME: '/h' })), undefined, 'no cloud vars, no warning');
+  assert.equal(cloudSyncWarning({ HOME: '/h', ENGRAM_CLOUD_TOKEN: '' }, resolveBrainsConfig({ HOME: '/h' })), undefined, 'empty values (compose defaults) do not count');
+  const optedIn = { ...env, ENGRAM_CLOUD_BRAINS: 'default' };
+  assert.equal(cloudSyncWarning(optedIn, resolveBrainsConfig(optedIn)), undefined, 'opted in, no warning');
 });
 
 // ---- bootstrap against the gateway database ----
@@ -149,10 +162,21 @@ function fakeClock(start = 1_000) {
   return { now: () => now, advance: ms => { now += ms; } };
 }
 
-function fakeProcesses() {
+/** Fake processes; with `manualClose`, close() only finishes when the test calls `finishClose()`. */
+function fakeProcesses({ manualClose = false } = {}) {
   const made = [];
   const create = brain => {
-    const proc = { brain, closed: false, live: () => !proc.closed, close: async () => { proc.closed = true; } };
+    let finish;
+    const proc = {
+      brain, closed: false, closeStarted: false,
+      live: () => !proc.closed,
+      close: () => {
+        proc.closeStarted = true;
+        if (!manualClose) { proc.closed = true; return Promise.resolve(); }
+        return new Promise(resolve => { finish = () => { proc.closed = true; resolve(); }; });
+      },
+      finishClose: () => finish()
+    };
     made.push(proc);
     return proc;
   };
@@ -160,21 +184,22 @@ function fakeProcesses() {
 }
 
 const brainsByslug = slugs => new Map(slugs.map(slug => [slug, { slug, dataDir: `/b/${slug}`, cloudSync: false }]));
+const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function newRegistry({ slugs = ['default', 'a', 'b', 'c'], max = 2, idle = 1000 } = {}) {
+function newRegistry({ slugs = ['default', 'a', 'b', 'c'], max = 2, idle = 1000, manualClose = false } = {}) {
   const clock = fakeClock();
-  const procs = fakeProcesses();
+  const procs = fakeProcesses({ manualClose });
   const registry = new BrainRegistry({ brains: brainsByslug(slugs), createProcess: procs.create, clock, idleTimeoutMs: idle, maxLiveBrains: max, logger: quiet });
   return { clock, procs, registry };
 }
 
-test('registry: one process per brain, created on first acquire and reused', () => {
+test('registry: one process per brain, created on first acquire and reused', async () => {
   const { procs, registry } = newRegistry();
   assert.equal(registry.has('a'), true);
   assert.equal(registry.has('zzz'), false);
   assert.deepEqual(registry.stats(), { live: 0, idle: 0 });
-  const first = registry.acquire('a');
-  const second = registry.acquire('a');
+  const first = await registry.acquire('a');
+  const second = await registry.acquire('a');
   assert.equal(first.process, second.process);
   assert.equal(procs.made.length, 1);
   assert.deepEqual(registry.stats(), { live: 1, idle: 0 });
@@ -182,64 +207,121 @@ test('registry: one process per brain, created on first acquire and reused', () 
   second.release();
   second.release(); // idempotent
   assert.deepEqual(registry.stats(), { live: 1, idle: 1 });
-  assert.throws(() => registry.acquire('zzz'), /unknown brain/);
+  await assert.rejects(registry.acquire('zzz'), /unknown brain/);
 });
 
-test('registry: idle processes are reaped after the timeout, busy ones never', () => {
+test('registry: N concurrent first requests create exactly one process', async () => {
+  const { procs, registry } = newRegistry();
+  const leases = await Promise.all(Array.from({ length: 20 }, () => registry.acquire('a')));
+  assert.equal(procs.made.length, 1);
+  assert.ok(leases.every(lease => lease.process === procs.made[0]));
+});
+
+test('registry: idle processes are reaped after the timeout, busy ones never', async () => {
   const { clock, procs, registry } = newRegistry();
-  const a = registry.acquire('a');
-  a.release();
-  const b = registry.acquire('b');
+  (await registry.acquire('a')).release();
+  const b = await registry.acquire('b');
   clock.advance(999);
-  registry.reap();
+  await registry.reap();
   assert.equal(procs.made[0].closed, false);
   clock.advance(1);
-  registry.reap();
+  await registry.reap();
   assert.equal(procs.made[0].closed, true, 'idle brain a reaped');
   assert.equal(procs.made[1].closed, false, 'busy brain b kept');
   assert.deepEqual(registry.stats(), { live: 1, idle: 0 });
   b.release();
-  // A new acquire after reaping spawns a fresh process.
-  registry.acquire('a').release();
+  // A new acquire after reaping creates a fresh process.
+  (await registry.acquire('a')).release();
   assert.equal(procs.made.length, 3);
 });
 
-test('registry: MAX_LIVE_BRAINS evicts the least recently used idle brain', () => {
+test('registry: a brain being stopped is only started again once its old child has closed', async () => {
+  const { clock, procs, registry } = newRegistry({ manualClose: true });
+  (await registry.acquire('a')).release();
+  clock.advance(1000);
+  void registry.reap();
+  assert.equal(procs.made[0].closeStarted, true);
+  let acquired = false;
+  const again = registry.acquire('a').then(lease => { acquired = true; return lease; });
+  await tick();
+  assert.equal(acquired, false, 'waits for the closing child');
+  assert.equal(procs.made.length, 1, 'no second process on the same data dir while the first is closing');
+  assert.deepEqual(registry.stats(), { live: 1, idle: 1 }, 'the closing child still counts as live');
+  procs.made[0].finishClose();
+  const lease = await again;
+  assert.equal(procs.made.length, 2);
+  assert.equal(lease.process, procs.made[1]);
+});
+
+test('registry: MAX_LIVE_BRAINS evicts the least recently used idle brain', async () => {
   const { clock, procs, registry } = newRegistry({ max: 2 });
-  registry.acquire('a').release();
+  (await registry.acquire('a')).release();
   clock.advance(10);
-  registry.acquire('b').release();
+  (await registry.acquire('b')).release();
   clock.advance(10);
-  registry.acquire('a').release(); // a is now the most recent
+  (await registry.acquire('a')).release(); // a is now the most recent
   clock.advance(10);
-  registry.acquire('c').release();
+  (await registry.acquire('c')).release();
   assert.deepEqual(procs.made.map(p => [p.brain.slug, p.closed]), [['a', false], ['b', true], ['c', false]]);
 });
 
-test('registry: at capacity with every brain busy, a new brain is refused', () => {
+test('registry: closing children count against MAX_LIVE_BRAINS', async () => {
+  const { procs, registry } = newRegistry({ max: 2, manualClose: true });
+  (await registry.acquire('a')).release();
+  (await registry.acquire('b')).release();
+  let started = false;
+  const c = registry.acquire('c').then(lease => { started = true; return lease; });
+  await tick();
+  assert.equal(procs.made[0].closeStarted, true, 'the LRU idle brain a is being stopped');
+  assert.equal(started, false, 'c waits until a has really exited');
+  assert.equal(procs.made.length, 2);
+  procs.made[0].finishClose();
+  await c;
+  assert.equal(procs.made.length, 3);
+});
+
+test('registry: at capacity with every brain busy, a new brain is refused', async () => {
   const { registry } = newRegistry({ max: 2 });
-  registry.acquire('a');
-  registry.acquire('b');
-  assert.throws(() => registry.acquire('c'), BrainCapacityError);
+  await registry.acquire('a');
+  await registry.acquire('b');
+  await assert.rejects(registry.acquire('c'), BrainCapacityError);
   // An already-live brain is still served.
-  registry.acquire('a').release();
+  (await registry.acquire('a')).release();
 });
 
 test('registry: stopAll closes every process and refuses new work', async () => {
   const { procs, registry } = newRegistry({ max: 3 });
-  registry.acquire('a');
-  registry.acquire('b').release();
+  await registry.acquire('a');
+  (await registry.acquire('b')).release();
   await registry.stopAll();
   assert.ok(procs.made.every(p => p.closed));
   assert.deepEqual(registry.stats(), { live: 0, idle: 0 });
-  assert.throws(() => registry.acquire('a'), /stopped/);
+  await assert.rejects(registry.acquire('a'), /stopped/);
 });
 
-test('registry: a process whose child died does not count as live', () => {
+test('registry: a process whose child died does not count as live', async () => {
   const { procs, registry } = newRegistry();
-  registry.acquire('a').release();
+  (await registry.acquire('a')).release();
   procs.made[0].closed = true;
   assert.deepEqual(registry.stats(), { live: 0, idle: 0 });
+});
+
+test('registry + bridge: N concurrent first requests spawn exactly one engram child', async () => {
+  const dir = scratch('spawns');
+  const spawnLog = join(dir, 'spawns');
+  const registry = new BrainRegistry({
+    brains: brainsByslug(['a']),
+    createProcess: () => createEngramBridge({ command: process.execPath, args: [DUMP_ENV], env: { FAKE_SPAWN_LOG: spawnLog }, logger: quiet }),
+    clock: fakeClock(), idleTimeoutMs: 60_000, maxLiveBrains: 2, logger: quiet
+  });
+  try {
+    const leases = await Promise.all(Array.from({ length: 10 }, () => registry.acquire('a')));
+    await Promise.all(leases.map(lease => lease.process.factory({})));
+    assert.equal(readFileSync(spawnLog, 'utf8').length, 1, 'one spawn');
+    for (const lease of leases) lease.release();
+  } finally {
+    await registry.stopAll();
+  }
 });
 
 test('DEFAULT_BRAIN is "default"', () => {

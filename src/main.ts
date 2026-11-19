@@ -12,7 +12,7 @@ import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
-import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, resolveBrainsConfig } from './brains/index.js';
+import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createEngramBridge } from './bridge/index.js';
 import { resolveGatewayConfig } from './config.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
@@ -42,6 +42,8 @@ function gatewayDbPath(env: NodeJS.ProcessEnv): string {
 async function main(): Promise<void> {
   const config = resolveGatewayConfig(process.env);
   const brainsConfig = resolveBrainsConfig(process.env);
+  const cloudWarning = cloudSyncWarning(process.env, brainsConfig);
+  if (cloudWarning) logger.warn(cloudWarning);
 
   const dataDir = process.env.GATEWAY_DATA_DIR?.trim();
   if (dataDir) mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -67,7 +69,7 @@ async function main(): Promise<void> {
     brains: new Map(brains.map(brain => [brain.slug, brain])),
     createProcess: brain => {
       mkdirSync(brain.dataDir, { recursive: true, mode: 0o700 });
-      return createEngramBridge({ command, args, env: buildChildEnv(brain, process.env), logger });
+      return createEngramBridge({ command, args, env: buildChildEnv(brain, process.env), logger, brain: brain.slug });
     },
     clock: { now: () => Date.now() },
     idleTimeoutMs: brainsConfig.idleTimeoutMs,
@@ -76,7 +78,7 @@ async function main(): Promise<void> {
   });
   // Fail at startup, as before, when engram cannot run; the default brain is
   // then reaped like any other once idle.
-  const warm = registry.acquire(DEFAULT_BRAIN);
+  const warm = await registry.acquire(DEFAULT_BRAIN);
   try {
     await warm.process.start();
   } finally {

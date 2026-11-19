@@ -7,7 +7,7 @@ export { DEFAULT_BRAIN, parseBrainSlug } from './domain/brain.js';
 export type { Brain, SlugCheck } from './domain/brain.js';
 export type { BrainProcess, BrainRepository, Clock } from './application/ports.js';
 export { brainDataDir } from './application/data-dir.js';
-export { buildChildEnv } from './application/child-env.js';
+export { buildChildEnv, cloudSyncWarning } from './application/child-env.js';
 export { bootstrapBrains } from './application/bootstrap.js';
 export type { BrainsConfig } from './application/bootstrap.js';
 export { BrainCapacityError, BrainRegistry } from './application/brain-registry.js';

@@ -27,11 +27,23 @@ export const MCP_BRAIN_LOCAL = 'mcpBrain';
  * What the MCP endpoint needs from the brains: which slugs exist, and a
  * lease on a brain's server factory for the duration of one request.
  */
+/** One brain's Engram child as the HTTP layer sees it. */
+export interface McpBrainProcess {
+  factory: McpServerFactory;
+  /** Resolves once the child is connected; rejects when it cannot start (yet). */
+  ready?(): Promise<void>;
+  /** Milliseconds until the child may be started again after a failure; 0 when it may start now. */
+  retryAfterMs?(): number;
+}
+
 export interface McpBrains {
   has(slug: string): boolean;
-  /** Throws when the brain cannot be served right now (e.g. every child slot is busy). */
-  acquire(slug: string): { process: { factory: McpServerFactory }; release(): void };
+  /** Rejects when the brain cannot be served right now (e.g. every child slot is busy). */
+  acquire(slug: string): Promise<{ process: McpBrainProcess; release(): void }>;
 }
+
+/** Seconds for `Retry-After` when no better estimate is known. */
+const DEFAULT_RETRY_AFTER_S = 5;
 
 /**
  * Express `res.locals` key an authentication middleware sets to the verified
@@ -180,8 +192,10 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
     return handler;
   };
 
-  // Unknown brains answer exactly like any unknown path, before authentication,
-  // so the response never tells which brains exist.
+  // Unknown brains answer exactly like any unknown path, before authentication.
+  // Brain names are not secret, though: a known brain answers 401 without a
+  // token (and has protected-resource metadata), an unknown one 404, so anyone
+  // can test whether a name exists. Accepted; see "Brains" in the README.
   const selectBrain = (fixed?: string): RequestHandler => (req, res, next) => {
     const slug = fixed ?? req.params.brain ?? '';
     if (!options.brains.has(slug)) {
@@ -192,15 +206,20 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
     next();
   };
 
+  const unavailable = (res: ExpressResponse, slug: string, reason: string, retryAfterMs?: number): void => {
+    options.logger.warn('Brain unavailable', { brain: slug, reason });
+    const seconds = retryAfterMs !== undefined && retryAfterMs > 0 ? Math.ceil(retryAfterMs / 1000) : DEFAULT_RETRY_AFTER_S;
+    res.setHeader('Retry-After', String(seconds));
+    res.status(503).json({ error: 'brain_unavailable' });
+  };
+
   const serve = async (req: ExpressRequest, res: ExpressResponse, next: NextFunction): Promise<void> => {
     const slug = res.locals[MCP_BRAIN_LOCAL] as string;
-    let lease: ReturnType<McpBrains['acquire']>;
+    let lease: Awaited<ReturnType<McpBrains['acquire']>>;
     try {
-      lease = options.brains.acquire(slug);
+      lease = await options.brains.acquire(slug);
     } catch (error) {
-      options.logger.warn('Brain unavailable', { brain: slug, reason: (error as Error).message });
-      res.setHeader('Retry-After', '5');
-      res.status(503).json({ error: 'brain_unavailable' });
+      unavailable(res, slug, (error as Error).message);
       return;
     }
     const controller = new AbortController();
@@ -210,9 +229,25 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
       if (!res.writableFinished) controller.abort();
       lease.release();
     });
+    const { process } = lease;
+    // A child that failed to start (or crashed) is not respawned until its
+    // cooldown ends; until then the brain answers 503 without touching Engram.
+    const cooling = process.retryAfterMs?.() ?? 0;
+    if (cooling > 0) {
+      unavailable(res, slug, 'restart cooldown', cooling);
+      return;
+    }
+    if (process.ready) {
+      try {
+        await process.ready();
+      } catch (error) {
+        unavailable(res, slug, (error as Error).message, process.retryAfterMs?.());
+        return;
+      }
+    }
     try {
       const authInfo = res.locals[MCP_AUTH_INFO_LOCAL] as AuthInfo | undefined;
-      const response = await handlerFor(lease.process.factory).fetch(toWebRequest(req, controller.signal), authInfo ? { authInfo } : undefined);
+      const response = await handlerFor(process.factory).fetch(toWebRequest(req, controller.signal), authInfo ? { authInfo } : undefined);
       await sendWebResponse(response, res, options.logger);
     } catch (error) {
       next(error);

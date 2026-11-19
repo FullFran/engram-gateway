@@ -24,6 +24,10 @@ export interface EngramBridgeOptions {
    * audit -> wrap). Defaults to `createToolCallPipeline()`: secret redaction on.
    */
   pipeline?: ToolCallPipeline;
+  /** The brain this child serves (its slug), for logs and the per-call context. */
+  brain?: string;
+  /** Clock for the restart cooldown; defaults to `Date.now`. */
+  nowMs?: () => number;
 }
 
 export interface EngramBridge {
@@ -33,19 +37,39 @@ export interface EngramBridge {
   start(): Promise<void>;
   /** Closes stdin so the child can flush and exit; escalates to a kill after a timeout. */
   close(): Promise<void>;
+  /** Resolves once a child is connected, starting one if needed; rejects during a cooldown. */
+  ready(): Promise<void>;
   /** A child is connected or being started. */
   live(): boolean;
+  /** Milliseconds until a new child may be started after a failure; 0 when none is pending. */
+  retryAfterMs(): number;
 }
 
 const GATEWAY_NAME = 'engram-gateway';
 const FALLBACK_VERSION = '0.0.0';
+/** Restart cooldown after a failed start or an unexpected exit: 1 s, doubling, at most 30 s. */
+const COOLDOWN_BASE_MS = 1000;
+const COOLDOWN_MAX_MS = 30_000;
+/** A child that ran this long before exiting was healthy: its exit starts the backoff afresh. */
+const STABLE_UPTIME_MS = 60_000;
 
 export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
   const { logger } = opts;
   const pipeline = opts.pipeline ?? createToolCallPipeline();
+  const now = opts.nowMs ?? Date.now;
+  const fields = opts.brain !== undefined ? { brain: opts.brain } : {};
   let current: Client | undefined;
   let connecting: Promise<Client> | undefined;
   let closed = false;
+  let failures = 0;
+  let coolUntil = 0;
+
+  function fail(reason: string): void {
+    failures += 1;
+    const delay = Math.min(COOLDOWN_MAX_MS, COOLDOWN_BASE_MS * 2 ** (failures - 1));
+    coolUntil = now() + delay;
+    logger.warn(`Engram child ${reason}; no restart for ${Math.ceil(delay / 1000)} s`, fields);
+  }
 
   async function connect(): Promise<Client> {
     const client = new Client({ name: GATEWAY_NAME, version: FALLBACK_VERSION });
@@ -55,27 +79,32 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
       env: { ...(opts.env ?? {}) },
       stderr: 'inherit'
     });
+    let connectedAt = 0;
     client.onclose = () => {
       if (current === client) {
         current = undefined;
-        if (!closed) logger.warn('Engram child closed; it will be restarted on the next request');
+        if (closed) return;
+        if (now() - connectedAt >= STABLE_UPTIME_MS) failures = 0;
+        fail('exited unexpectedly; it is restarted on the next request after the cooldown');
       }
     };
     client.onerror = error => {
-      logger.warn('Engram client error', { error: error.message });
+      logger.warn('Engram client error', { ...fields, error: error.message });
     };
     try {
       await client.connect(transport);
     } catch (error) {
       await client.close().catch(() => undefined);
+      if (!closed) fail(`failed to start (${(error as Error).message})`);
       throw error;
     }
     if (closed) {
       await client.close().catch(() => undefined);
       throw new Error('Engram bridge is closed');
     }
+    connectedAt = now();
     current = client;
-    logger.info('Connected to Engram', { server: client.getServerVersion()?.version });
+    logger.info('Connected to Engram', { ...fields, server: client.getServerVersion()?.version });
     return client;
   }
 
@@ -84,7 +113,9 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
     if (closed) return Promise.reject(new Error('Engram bridge is closed'));
     if (current) return Promise.resolve(current);
     if (!connecting) {
-      logger.info('Starting Engram child', { command: opts.command });
+      const wait = coolUntil - now();
+      if (wait > 0) return Promise.reject(new Error(`Engram child is cooling down after a failure; retry in ${Math.ceil(wait / 1000)} s`));
+      logger.info('Starting Engram child', { ...fields, command: opts.command });
       connecting = connect().finally(() => {
         connecting = undefined;
       });
@@ -124,8 +155,14 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
       // StdioClientTransport.close(): ends stdin, waits 2s, SIGTERM, waits 2s, SIGKILL.
       await client?.close();
     },
+    async ready() {
+      await upstream();
+    },
     live() {
       return current !== undefined || connecting !== undefined;
+    },
+    retryAfterMs() {
+      return Math.max(0, coolUntil - now());
     }
   };
 }

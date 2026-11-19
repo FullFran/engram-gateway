@@ -23,3 +23,15 @@ export function buildChildEnv(brain: Brain, parent: Readonly<Record<string, stri
   }
   return env;
 }
+
+/**
+ * A startup warning when the gateway holds Engram Cloud settings but no brain
+ * receives them (the pre-brains layout synced the one memory). Names only,
+ * never values.
+ */
+export function cloudSyncWarning(parent: Readonly<Record<string, string | undefined>>, config: { cloud: readonly string[] }): string | undefined {
+  if (config.cloud.length > 0) return undefined;
+  const names = Object.keys(parent).filter(name => name.startsWith(CLOUD_PREFIX) && parent[name] !== undefined && parent[name] !== '').sort();
+  if (names.length === 0) return undefined;
+  return `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} set but ENGRAM_CLOUD_BRAINS is empty, so no brain syncs to Engram Cloud. Set ENGRAM_CLOUD_BRAINS=default to keep syncing the existing memory.`;
+}

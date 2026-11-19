@@ -219,6 +219,9 @@ async function checkBrainAudiences(github) {
     assertEqual(anonymous.headers['www-authenticate'], `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp/alpha", scope="memory"`, 'per-brain challenge');
     const metadata = await request(base, { path: '/.well-known/oauth-protected-resource/mcp/alpha' });
     assertEqual(metadata.body.resource, `${base}/mcp/alpha`, 'brain alpha is its own protected resource');
+    // Accepted existence oracle (README "Brains"): known brain 401 + metadata 200, unknown brain 404 for both.
+    assertEqual(metadata.status, 200, 'metadata of a known brain');
+    assertEqual((await request(base, { path: '/.well-known/oauth-protected-resource/mcp/ghost' })).status, 404, 'no metadata for an unknown brain');
 
     const login = await githubLogin(base, github, 'FullFran');
     const alpha = await obtainToken(base, login.jar, `${base}/mcp/alpha`);
