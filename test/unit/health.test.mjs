@@ -7,42 +7,15 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { addObservation, addRelation, createBrainDb } from '../fixtures/engram-brain.mjs';
 import { BrainHealthUnavailableError, MAX_SAMPLE_SIZE, NOISE_TYPES, readBrainHealth } from '../../dist/health/index.js';
 
-const SCHEMA = readFileSync(fileURLToPath(new URL('../fixtures/engram-schema.sql', import.meta.url)), 'utf8');
 const NOW = new Date('2026-11-19T10:00:00Z');
 
 function scratch(t) {
   const dir = mkdtempSync(join(tmpdir(), 'engram-gateway-health-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
-}
-
-/** Creates `<dir>/engram.db` with the real schema; returns an open writer connection. */
-function createBrainDb(dir, { wal = false } = {}) {
-  const db = new DatabaseSync(join(dir, 'engram.db'));
-  if (wal) db.exec('PRAGMA journal_mode = WAL');
-  db.exec(SCHEMA);
-  db.prepare("INSERT INTO sessions (id, project, directory) VALUES ('s1', 'demo', '/tmp/demo')").run();
-  return db;
-}
-
-function addObservation(db, { type, title, deleted = false, reviewAfter = null }) {
-  return Number(db.prepare(
-    `INSERT INTO observations (session_id, type, title, content, deleted_at, review_after)
-     VALUES ('s1', ?, ?, 'synthetic content', ?, ?)`,
-  ).run(type, title, deleted ? '2026-10-01 00:00:00' : null, reviewAfter).lastInsertRowid);
-}
-
-let relationSeq = 0;
-function addRelation(db, { status, superseded = false }) {
-  relationSeq += 1;
-  return Number(db.prepare(
-    `INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, superseded_at)
-     VALUES (?, 'obs-a', 'obs-b', ?, ?, ?)`,
-  ).run(`rel-${relationSeq}`, status === 'pending' ? 'pending' : 'related', status, superseded ? '2026-10-02 00:00:00' : null).lastInsertRowid);
 }
 
 /**

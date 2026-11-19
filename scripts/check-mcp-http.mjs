@@ -20,7 +20,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { TOOL_ROLES } from '../dist/authz/index.js';
+import { GATEWAY_TOOL_ROLES, TOOL_ROLES } from '../dist/authz/index.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -278,8 +278,22 @@ async function checkRoles(github) {
     const readerList = await mcpToolsList(base, '/mcp/alpha', bearer(readerAlpha.accessToken));
     assertEqual(readerList.status, 200, 'reader tools/list');
     assertEqual(JSON.stringify(names(readerList)), JSON.stringify(rolesOf('reader')), 'reader sees exactly the reader tools');
-    assertEqual(names(await mcpToolsList(base, '/mcp/alpha', bearer(adminAlpha.accessToken))).length, Object.keys(TOOL_ROLES).length, 'the admin (owner) sees every tool');
+    const everyTool = [...Object.keys(TOOL_ROLES), ...Object.keys(GATEWAY_TOOL_ROLES)].sort();
+    assertEqual(JSON.stringify(names(await mcpToolsList(base, '/mcp/alpha', bearer(adminAlpha.accessToken)))), JSON.stringify(everyTool), 'the admin (owner) sees every engram tool and every gateway tool');
     ok('tools/list holds exactly the tools the role allows');
+
+    // --- brain_health (#18): owner tool and admin endpoint, read-only from the brain's engram.db ---
+    const healthCall = await mcpCall(base, '/mcp/alpha', 'brain_health', { sampleSize: 1 }, bearer(adminAlpha.accessToken));
+    assert(healthCall.result?.result && !healthCall.result.result.isError, `brain_health answers the admin: ${healthCall.text.slice(0, 300)}`);
+    assert(/"brain":"alpha"/.test(toolText(healthCall.result)) && /"observations":\{"live":\d+/.test(toolText(healthCall.result)), `brain_health reports on alpha: ${toolText(healthCall.result).slice(0, 300)}`);
+    const readerHealth = await mcpCall(base, '/mcp/alpha', 'brain_health', {}, bearer(readerAlpha.accessToken));
+    assertEqual(readerHealth.result?.error?.code, -32602, 'brain_health by a reader is an MCP error');
+    const adminHealth = await fetch(`${base}/admin/brains/alpha/health`, { headers: bearer(adminAlpha.accessToken) });
+    assertEqual(adminHealth.status, 200, 'the admin endpoint answers an instance admin');
+    assertEqual((await adminHealth.json()).brain, 'alpha', 'the admin endpoint reports on alpha');
+    assertEqual((await fetch(`${base}/admin/brains/alpha/health`, { headers: bearer(readerAlpha.accessToken) })).status, 403, 'the admin endpoint refuses a non-admin');
+    assertEqual((await fetch(`${base}/admin/brains/alpha/health`)).status, 401, 'the admin endpoint needs authentication');
+    ok('brain_health: owners call the tool, admins read the endpoint, everyone else is refused');
 
     // --- a reader calling mem_save: MCP error, nothing written, audited as denied ---
     const marker = `reader-write-${Date.now()}`;

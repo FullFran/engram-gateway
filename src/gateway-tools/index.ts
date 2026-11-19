@@ -1,0 +1,10 @@
+/**
+ * Gateway tools: MCP tools served by the gateway itself, merged into each
+ * brain's tools/list and routed before forwarding to engram, through the same
+ * tool-call pipeline. Roles: GATEWAY_TOOL_ROLES in src/authz.
+ */
+export { toolError } from './domain/gateway-tool.js';
+export type { GatewayTool, GatewayToolContext, GatewayToolDefinition, GatewayToolResult } from './domain/gateway-tool.js';
+export { createGatewayToolSet, mergeToolLists } from './application/gateway-tool-set.js';
+export type { GatewayToolSet } from './application/gateway-tool-set.js';
+export { BRAIN_HEALTH_TOOL, createBrainHealthTool } from './tools/brain-health.js';

@@ -39,5 +39,16 @@ A new finding is one method on the `BrainHealthSource` port
 files (`wiki.db`, `vectors.db`) through new sources and replace the
 `unavailable` placeholders.
 
-Exposure (`brain_health` tool and admin endpoint, owner/admin only) arrives
-with roles and grants (#6).
+## Exposure
+
+- MCP tool `brain_health` (a gateway tool, see
+  [gateway-tools.md](gateway-tools.md)): role `owner` on the brain. The
+  report is returned as JSON text, delimited as data by the wrap stage (#19),
+  since observation type names are chosen by writers.
+- `GET /admin/brains/<slug>/health?sampleSize=&maxTypes=`: instance admins
+  only. `401` without credentials, `403` for a non-admin, `400
+  {"error":"invalid_request"}` for bad options, `404` for an unknown brain or
+  `{"error":"no_data"}` for a brain without `engram.db`.
+
+Both add `brain` (the slug) to the report and go through one
+`BrainHealthService` (`src/health/application/brain-health-service.ts`).

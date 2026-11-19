@@ -79,3 +79,11 @@ export function clampLimit(value: number | undefined, fallback: number, max: num
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(0, Math.trunc(value)));
 }
+
+/** The brain has no readable `engram.db` (never written to, or the wrong directory). */
+export class BrainHealthUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BrainHealthUnavailableError';
+  }
+}

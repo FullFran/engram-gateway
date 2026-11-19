@@ -479,12 +479,25 @@ keyed by brain and Engram's observation id.
 
 ### Brain health report
 
-`src/health` computes a read-only, size-bounded report from one brain's
-`engram.db` (`readBrainHealth({ dataDir, now })`). It opens the file with
-`node:sqlite` in read-only mode (never through the brain's `engram mcp`
-child), so it works whether the child runs or not. It is not exposed yet: the
-`brain_health` tool and the admin endpoint come with roles (#6). See
-[docs/health-report.md](docs/health-report.md) for every finding.
+A read-only, size-bounded report per brain (`src/health`), computed from the
+brain's `engram.db` opened with `node:sqlite` in read-only mode (never
+through its `engram mcp` child): counts by type, share of automatic noise
+rows, duplicate titles, unjudged pending relations and observations past
+`review_after`. Counts and sample ids only, never contents.
+
+- **MCP tool `brain_health`** on `/mcp/<brain>`: owners of the brain only
+  (instance admins own every brain). Optional arguments `sampleSize`
+  (default 5, at most 50) and `maxTypes` (default 50, at most 200). Audited
+  like any tool call.
+- **Admin endpoint `GET /admin/brains/<slug>/health`**: instance admins only
+  (`ALLOWED_GITHUB_LOGINS`), authenticated with a bearer token for that
+  brain's resource or a session cookie; same query options. `404
+  {"error":"no_data"}` for a brain with nothing saved yet. Open when
+  authentication is off (loopback), like `/mcp`.
+
+See [docs/health-report.md](docs/health-report.md) for every finding and
+[docs/gateway-tools.md](docs/gateway-tools.md) for how the gateway serves its
+own tools.
 
 ## Develop
 

@@ -5,6 +5,8 @@ import type { McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
 import { ToolCallDeniedError, createToolCallPipeline, runToolCall } from '../pipeline/index.js';
 import type { ToolCaller, ToolCallPipeline, ToolCallResult } from '../pipeline/index.js';
+import { mergeToolLists } from '../gateway-tools/index.js';
+import type { GatewayToolSet } from '../gateway-tools/index.js';
 
 export interface EngramBridgeOptions {
   /** Executable to spawn, normally `engram`. */
@@ -25,6 +27,12 @@ export interface EngramBridgeOptions {
    * Defaults to `createToolCallPipeline()`: secret redaction on, every tool allowed.
    */
   pipeline?: ToolCallPipeline;
+  /**
+   * Tools the gateway serves itself (e.g. `brain_health`): listed after
+   * engram's tools and handled locally instead of being forwarded, through the
+   * same pipeline. Default: none.
+   */
+  gatewayTools?: GatewayToolSet;
   /** The brain this child serves (its slug), for logs and the per-call context. */
   brain?: string;
   /** Clock for the restart cooldown; defaults to `Date.now`. */
@@ -64,6 +72,7 @@ function callerOf(authInfo: { clientId?: string; extra?: Record<string, unknown>
 export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
   const { logger } = opts;
   const pipeline = opts.pipeline ?? createToolCallPipeline();
+  const gatewayTools = opts.gatewayTools;
   const now = opts.nowMs ?? Date.now;
   const fields = opts.brain !== undefined ? { brain: opts.brain } : {};
   let current: Client | undefined;
@@ -143,13 +152,18 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
     const brain = opts.brain ?? null;
     server.setRequestHandler('tools/list', async request => {
       const listed = await (await upstream()).listTools(request.params);
-      return { ...listed, tools: pipeline.listTools({ ...(caller ? { caller } : {}), brain }, listed.tools) };
+      const tools = gatewayTools ? mergeToolLists(listed.tools, gatewayTools.definitions() as typeof listed.tools) : listed.tools;
+      return { ...listed, tools: pipeline.listTools({ ...(caller ? { caller } : {}), brain }, tools) };
     });
     server.setRequestHandler('tools/call', async request => {
       const { name, arguments: args } = request.params;
       try {
-        const result = await runToolCall(pipeline, { name, ...(args !== undefined ? { arguments: args } : {}) }, async call =>
-          (await (await upstream()).callTool(call)) as ToolCallResult,
+        // Gateway tools are handled here; everything else is forwarded to engram.
+        const forward = async (call: { name: string; arguments?: Record<string, unknown> }): Promise<ToolCallResult> =>
+          gatewayTools?.has(call.name)
+            ? gatewayTools.call(call.name, call.arguments, { brain })
+            : ((await (await upstream()).callTool(call)) as ToolCallResult);
+        const result = await runToolCall(pipeline, { name, ...(args !== undefined ? { arguments: args } : {}) }, forward,
         { ...(caller ? { caller } : {}), brain });
         return result as Awaited<ReturnType<Client['callTool']>>;
       } catch (error) {

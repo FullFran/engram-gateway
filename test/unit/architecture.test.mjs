@@ -118,3 +118,16 @@ test('health reads the brain DB itself: it never imports the bridge, http or aut
     for (const spec of imports(file)) assert.ok(target(file, spec).startsWith('health/domain/'), `${relative(src, file)} imports ${spec}`);
   }
 });
+
+test('gateway-tools never imports http, auth or the MCP packages; its domain is pure', () => {
+  const dir = join(src, 'gateway-tools');
+  for (const file of files(dir)) {
+    for (const spec of imports(file)) {
+      const to = target(file, spec);
+      for (const other of ['http/', 'auth/', 'bridge/', '@modelcontextprotocol/']) assert.ok(!to.startsWith(other), `${relative(src, file)} imports ${spec}`);
+    }
+  }
+  for (const file of files(join(dir, 'domain'))) {
+    for (const spec of imports(file)) assert.ok(target(file, spec).startsWith('gateway-tools/domain/'), `${relative(src, file)} imports ${spec}`);
+  }
+});

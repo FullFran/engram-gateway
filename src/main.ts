@@ -26,6 +26,8 @@ import {
 import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, buildChildEnv, cloudSyncWarning, resolveBrainsConfig } from './brains/index.js';
 import { createEngramBridge } from './bridge/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
+import { createBrainHealthTool, createGatewayToolSet } from './gateway-tools/index.js';
+import { createEngramBrainHealthService } from './health/index.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
 import { createGatewayApp } from './http/app.js';
 import { createAttributionStage, createAuditStage, createToolCallPipeline } from './pipeline/index.js';
@@ -98,13 +100,19 @@ async function main(): Promise<void> {
     })
   });
 
+  // Gateway tools (served by the gateway, same pipeline): brain_health (#18),
+  // read-only from each brain's engram.db, never through its child.
+  const dataDirs = new Map(brains.map(brain => [brain.slug, brain.dataDir]));
+  const health = createEngramBrainHealthService({ dataDirOf: slug => dataDirs.get(slug) });
+  const gatewayTools = createGatewayToolSet([createBrainHealthTool(health)]);
+
   const command = process.env.ENGRAM_BIN?.trim() || 'engram';
   const args = (process.env.ENGRAM_ARGS?.trim() || 'mcp').split(/\s+/);
   const registry = new BrainRegistry({
     brains: new Map(brains.map(brain => [brain.slug, brain])),
     createProcess: brain => {
       mkdirSync(brain.dataDir, { recursive: true, mode: 0o700 });
-      return createEngramBridge({ command, args, pipeline, env: buildChildEnv(brain, process.env), logger, brain: brain.slug });
+      return createEngramBridge({ command, args, pipeline, gatewayTools, env: buildChildEnv(brain, process.env), logger, brain: brain.slug });
     },
     clock: { now: () => Date.now() },
     idleTimeoutMs: brainsConfig.idleTimeoutMs,
@@ -166,6 +174,7 @@ async function main(): Promise<void> {
       brainAccess: { mayOpen: (login: string, brain: string) => grants.roleOf(login, brain) !== undefined }
     } : {}),
     brains: registry,
+    admin: { isAdmin: login => grants.isAdmin(login), brainHealth: (slug, rawOptions) => health.report(slug, rawOptions) },
     logger
   });
   const server = createServer(app);

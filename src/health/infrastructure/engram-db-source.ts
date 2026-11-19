@@ -2,15 +2,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import type { BrainHealthSource } from '../application/ports.js';
-import type { DuplicateTitlesFinding, SampledFinding, TypeCount } from '../domain/report.js';
+import { BrainHealthUnavailableError, type DuplicateTitlesFinding, type SampledFinding, type TypeCount } from '../domain/report.js';
 
-/** The brain has no readable `engram.db` (never written to, or the wrong directory). */
-export class BrainHealthUnavailableError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'BrainHealthUnavailableError';
-  }
-}
 
 const LIVE = 'deleted_at IS NULL';
 
