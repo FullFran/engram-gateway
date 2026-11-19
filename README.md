@@ -421,6 +421,37 @@ requests refused, and mutations need `Content-Type: application/json`.
 Errors are `{ error, message }`: 400 `invalid`, 404 `not_found`, 409
 `conflict`. Operators manage anyone's tokens with the CLI (see below).
 
+**Service accounts** are non-human principals for CI, containers and other
+automation, so their access does not hang on a person's account. An
+instance admin creates one (`POST /admin/api/service-accounts`, or
+`admin service-accounts create <login> --owner <admin-login>`) and becomes
+its owner; it is a `users` row with `kind = 'service'`.
+
+- It gets roles like any user, with API grants (`admin grants set`), and
+  its own personal access tokens, issued by an admin
+  (`/admin/api/service-accounts/<login>/tokens` or `admin tokens create`).
+- It can never sign in: a GitHub user with the same login is refused at
+  sign-in (the page says the login is a service account of this gateway),
+  and it has no session for `/account/api`. Its login takes the
+  name in the `users` table, so pick one no person uses (for example
+  `ci-<project>`).
+- It is never an instance admin: listing it in `ALLOWED_GITHUB_LOGINS`
+  stops the gateway at startup with an error. `BRAIN_GRANTS` may give it a
+  role, like `admin grants set`; that is a configuration grant, and it still
+  never signs in.
+- It answers to its owner: at startup, a service account whose owner is no
+  longer an active instance admin (removed from `ALLOWED_GITHUB_LOGINS`) is
+  disabled, logged (`Service account disabled`) and audited
+  (`service_account.disable`, system actor `startup`), so its tokens get 401.
+  It cannot be enabled again while its owner is not an admin; create a new
+  service account instead. `service-accounts list` shows it as `disabled`
+  with its old owner.
+- Disable it (`admin users disable`, `POST /admin/api/users/<login>/disable`)
+  and its tokens get 401 on the next request; revoking a grant blocks that
+  brain on the next request, as for a person.
+- Audit: `service_account.create` (target the login), plus the token rows
+  above with the admin (or `cli`) as actor.
+
 ### Gateway database
 
 Gateway state (OAuth clients, token families, hashed tokens and codes, the
@@ -514,6 +545,8 @@ docker exec <container> node dist/cli.js admin grants list [--brain <slug>] [--l
 docker exec <container> node dist/cli.js admin grants set <github-login> <brain> <reader|writer|owner>
 docker exec <container> node dist/cli.js admin grants revoke <github-login> <brain>
 docker exec <container> node dist/cli.js admin audit export [--brain <slug>] [--from <date>] [--to <date>] [--out <file>]
+docker exec <container> node dist/cli.js admin service-accounts list
+docker exec <container> node dist/cli.js admin service-accounts create <login> --owner <admin-login>
 docker exec <container> node dist/cli.js admin tokens list <login>
 docker exec <container> node dist/cli.js admin tokens create <login> --name <name> --brains <slug>[,<slug>...] --scope <read|read+write> --expires <30|90|365>
 docker exec <container> node dist/cli.js admin tokens revoke <login> <token-id>
@@ -554,10 +587,15 @@ loopback; `/admin/api` is not mounted at all with authentication off.
 | `GET /admin/api/brains` | | Brains with `status` (`active`, `archived`) and, for active ones, `live`/`idle` of their child |
 | `POST /admin/api/brains` | `{"slug"}` | Create a brain (`201`) |
 | `POST /admin/api/brains/<slug>/archive` | `{}` | Archive a brain |
-| `GET /admin/api/users` | | Users with `status` (`invited`, `active`, `disabled`) and `isAdmin` |
+| `GET /admin/api/users` | | Users with `status` (`invited`, `active`, `disabled`), `isAdmin` and `kind` (`human`, `service`) |
 | `POST /admin/api/users` | `{"login"}` | Invite a GitHub login (`201`) |
 | `POST /admin/api/users/<login>/disable` | `{}` | Disable a user |
 | `POST /admin/api/users/<login>/enable` | `{}` | Enable a disabled user |
+| `GET /admin/api/service-accounts` | | Service accounts with `status` and `owner` |
+| `POST /admin/api/service-accounts` | `{"login"}` | Create a service account owned by you (`201`) |
+| `GET /admin/api/service-accounts/<login>/tokens` | | Its personal access tokens (never the secret) |
+| `POST /admin/api/service-accounts/<login>/tokens` | `{"name", "brains", "scope", "expiresInDays"}` | Issue one (`201`, with `token`, shown once) |
+| `DELETE /admin/api/service-accounts/<login>/tokens/<id>` | | Revoke one |
 | `GET /admin/api/grants?brain=&login=` | | Grants with their `source` (`config`, `api`) |
 | `PUT /admin/api/brains/<slug>/grants/<login>` | `{"role"}` | Grant or change a role |
 | `DELETE /admin/api/brains/<slug>/grants/<login>` | | Revoke a grant (`204`) |

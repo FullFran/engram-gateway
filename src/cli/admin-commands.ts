@@ -5,7 +5,7 @@ import { AdminError, AdminService, CLI_ACTOR, SqliteAdminStore, fsBrainDirectori
 import type { AuditFilter } from '../audit/index.js';
 import { resolveBrainsConfig } from '../brains/index.js';
 import { resolveGatewayDbPath } from '../config.js';
-import { PatError, PersonalAccessTokens, SqliteConnectionStore, SqlitePatStore, nodePatSecrets, patJson } from '../connections/index.js';
+import { PatError, PersonalAccessTokens, adminPatPort, SqliteConnectionStore, SqlitePatStore, nodePatSecrets, patJson } from '../connections/index.js';
 import { SqliteAuditLog } from '../audit/index.js';
 import { SqliteGrantRepository } from '../authz/index.js';
 import { openGatewayDatabase } from '../shared/gateway-database.js';
@@ -22,6 +22,8 @@ export const ADMIN_USAGE = `usage:
   node dist/cli.js admin grants set <github-login> <brain> <reader|writer|owner>
   node dist/cli.js admin grants revoke <github-login> <brain>
   node dist/cli.js admin audit export [--brain <slug>] [--from <date>] [--to <date>] [--out <file>]
+  node dist/cli.js admin service-accounts list
+  node dist/cli.js admin service-accounts create <login> --owner <admin-login>
   node dist/cli.js admin tokens list <login>
   node dist/cli.js admin tokens create <login> --name <name> --brains <slug>[,<slug>...] --scope <read|read+write> --expires <30|90|365>
   node dist/cli.js admin tokens revoke <login> <token-id>`;
@@ -74,6 +76,7 @@ const COMMANDS: Record<string, Record<string, number>> = {
   users: { list: 0, invite: 1, disable: 1, enable: 1 },
   grants: { list: 0, set: 3, revoke: 2 },
   audit: { export: 0 },
+  'service-accounts': { list: 0, create: 1 },
   tokens: { list: 1, create: 1, revoke: 2 }
 };
 
@@ -105,16 +108,19 @@ export async function runAdminCli(argv: readonly string[], env: Env, io: CliIo):
   let db: ReturnType<typeof openGatewayDatabase> | undefined;
   try {
     db = openGatewayDatabase(gatewayDbPath(env));
+    const clock = { nowMs: () => Date.now() };
+    const tokens = new PersonalAccessTokens({
+      store: new SqlitePatStore(db, new SqliteConnectionStore(db)), grants: new SqliteGrantRepository(db), secrets: nodePatSecrets,
+      clock, audit: new SqliteAuditLog(db)
+    });
     const service = new AdminService({
       store: new SqliteAdminStore(db),
       dirs: fsBrainDirectories(resolveBrainsConfig(env).brainsRoot),
-      clock: { nowMs: () => Date.now() }
+      clock,
+      tokens: adminPatPort(tokens, clock)
     });
     const actor = CLI_ACTOR;
-    const pats = () => new PersonalAccessTokens({
-      store: new SqlitePatStore(db!, new SqliteConnectionStore(db!)), grants: new SqliteGrantRepository(db!), secrets: nodePatSecrets,
-      clock: { nowMs: () => Date.now() }, audit: new SqliteAuditLog(db!)
-    });
+    const pats = () => tokens;
     switch (`${group} ${command}`) {
       case 'brains list':
         for (const brain of service.listBrains(actor)) io.print(`${brain.slug}\t${brain.status}\t${brain.cloudSync ? 'cloud-sync' : '-'}\t${brain.dataDir}`);
@@ -129,7 +135,7 @@ export async function runAdminCli(argv: readonly string[], env: Env, io: CliIo):
         io.print(`archived brain ${args[0]} (no new sessions; a running child stops when idle; data stays on disk)`);
         break;
       case 'users list':
-        for (const user of service.listUsers(actor)) io.print(`${user.login}\t${user.status}${user.isAdmin ? '\tadmin' : ''}`);
+        for (const user of service.listUsers(actor)) io.print(`${user.login}\t${user.status}${user.isAdmin ? '\tadmin' : ''}${user.kind === 'service' ? '\tservice' : ''}`);
         break;
       case 'users invite':
         io.print(`invited ${service.inviteUser(actor, args[0]!).login} (activated by their first sign-in; grant them a role on a brain)`);
@@ -177,6 +183,14 @@ export async function runAdminCli(argv: readonly string[], env: Env, io: CliIo):
         for (const line of lines) if (!file.write(line)) await once(file, 'drain');
         file.end();
         await once(file, 'finish');
+        break;
+      }
+      case 'service-accounts list':
+        for (const account of service.listServiceAccounts(actor)) io.print(`${account.login}\t${account.status}\towner ${account.owner ?? '-'}`);
+        break;
+      case 'service-accounts create': {
+        const account = service.createServiceAccount(actor, args[0]!, options.get('owner'));
+        io.print(`created service account ${account.login} (owner ${account.owner}); grant it roles with admin grants set and issue tokens with admin tokens create`);
         break;
       }
       case 'tokens list': {

@@ -22,5 +22,5 @@ export { PatError, PersonalAccessTokens } from './application/personal-access-to
 export type { CreatePatRequest, PatActor, PatAuthentication, PatDenyReason, PatRecord, PatSecrets, PatStore } from './application/personal-access-tokens.js';
 export { SqlitePatStore, nodePatSecrets } from './infrastructure/sqlite-pat-store.js';
 export { patIdentityProvider } from './infrastructure/pat-identity-provider.js';
-export { createAccountRouter, patJson } from './presentation/http/account-router.js';
+export { adminPatPort, createAccountRouter, patJson } from './presentation/http/account-router.js';
 export type { AccountIdentify, AccountRouterOptions } from './presentation/http/account-router.js';

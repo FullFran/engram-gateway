@@ -1,6 +1,7 @@
 import type { AuditEvent, AuditFilter, AuditRecord } from '../../audit/index.js';
 import type { Role } from '../../authz/index.js';
-import type { BrainView, GrantSource, GrantView, UserStatus, UserView } from '../domain/views.js';
+import type { AdminActor } from '../domain/admin-actor.js';
+import type { BrainView, GrantSource, GrantView, ServiceAccountView, UserStatus, UserView } from '../domain/views.js';
 
 /**
  * The gateway database as the admin use cases see it. Every mutation of one
@@ -21,6 +22,9 @@ export interface AdminStore {
   users(): UserView[];
   insertUser(login: string, status: UserStatus): void;
   setUserStatus(login: string, status: UserStatus): void;
+  /** Inserts an active service account owned by `owner` (#7). */
+  insertServiceAccount(login: string, owner: string): void;
+  serviceAccounts(): ServiceAccountView[];
 
   grant(login: string, brain: string): GrantView | undefined;
   grants(filter: { brain?: string; login?: string }): GrantView[];
@@ -52,4 +56,16 @@ export interface BrainRuntime {
 
 export interface AdminClock {
   nowMs(): number;
+}
+
+/**
+ * Personal access tokens (#7) as the admin use cases see them, for service
+ * accounts. Results are JSON-ready and never hold a secret, except the
+ * `token` of a creation. Refusals throw an error whose `code` is `invalid`,
+ * `not_found` or `conflict`. The tokens module audits these operations itself.
+ */
+export interface AdminTokens {
+  list(owner: string): object[];
+  create(actor: AdminActor, owner: string, request: { name: unknown; brains: unknown; scope: unknown; expiresInDays: unknown }): { token: string; id: number };
+  revoke(actor: AdminActor, owner: string, id: number): object;
 }

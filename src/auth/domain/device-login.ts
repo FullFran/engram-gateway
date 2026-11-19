@@ -5,7 +5,7 @@ export const MAX_PENDING_DEVICE_LOGINS = 20;
 
 export type DeviceOutcome =
   | { kind: 'success'; login: string }
-  | { kind: 'not_allowed'; login: string }
+  | { kind: 'not_allowed'; login: string; message?: string }
   | { kind: 'expired' }
   | { kind: 'denied' }
   | { kind: 'error' };

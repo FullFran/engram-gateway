@@ -49,7 +49,7 @@ function loginRedirect(res: Response, originalUrl: string): void {
 function failurePage(res: Response, outcome: Exclude<DeviceOutcome, { kind: 'success' }>): void {
   switch (outcome.kind) {
     case 'not_allowed':
-      sendErrorPage(res, 403, 'Account not allowed', `The GitHub account ${outcome.login} is not allowed to use this Engram memory.`, '/oauth/login');
+      sendErrorPage(res, 403, 'Account not allowed', outcome.message ?? `The GitHub account ${outcome.login} is not allowed to use this Engram memory.`, '/oauth/login');
       return;
     case 'expired':
       sendErrorPage(res, 400, 'Code expired', 'The sign-in code expired before it was entered on GitHub.', '/oauth/login');

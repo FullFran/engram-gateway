@@ -142,6 +142,28 @@ export function createAdminRouter(options: AdminRouterOptions): express.Router {
     res.json({ user: service.enableUser(actorOf(res), req.params.login!) });
   });
 
+  router.get('/service-accounts', (_req, res) => {
+    res.json({ serviceAccounts: service.listServiceAccounts(actorOf(res)) });
+  });
+  router.post('/service-accounts', (req, res) => {
+    res.status(201).json({ serviceAccount: service.createServiceAccount(actorOf(res), bodyText(req, 'login')) });
+  });
+  router.get('/service-accounts/:login/tokens', (req, res) => {
+    res.json({ tokens: service.listServiceAccountTokens(actorOf(res), req.params.login!) });
+  });
+  router.post('/service-accounts/:login/tokens', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    // The only time the secret leaves the gateway.
+    res.status(201).json(service.createServiceAccountToken(actorOf(res), req.params.login!, {
+      name: body.name, brains: body.brains, scope: body.scope, expiresInDays: body.expiresInDays
+    }));
+  });
+  router.delete('/service-accounts/:login/tokens/:id', (req, res) => {
+    const id = req.params.id!;
+    if (!/^\d{1,15}$/.test(id)) throw new AdminError('not_found', 'no such token');
+    res.json(service.revokeServiceAccountToken(actorOf(res), req.params.login!, Number(id)));
+  });
+
   router.get('/grants', (req, res) => {
     const brain = textParam(req.query.brain, 'brain');
     const login = textParam(req.query.login, 'login');

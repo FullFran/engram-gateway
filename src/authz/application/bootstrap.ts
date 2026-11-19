@@ -20,9 +20,11 @@ export interface AccessConfig {
  *   on the next start. Grants created through the admin API (#10) are not
  *   configuration and survive restarts; a `BRAIN_GRANTS` entry for the same
  *   login and brain replaces one. Users rows are kept (the audit log points at them).
+ * - a service account (#7) whose owner is no longer an instance admin is
+ *   disabled (returned, for the caller to log and audit).
  * Fails loudly, changing nothing, on an unknown brain or a grant for an admin.
  */
-export function bootstrapAccess(store: GrantStore, config: AccessConfig): void {
+export function bootstrapAccess(store: GrantStore, config: AccessConfig): { disabledServiceAccounts: string[] } {
   const admins = new Map(config.admins.map(login => [login.toLowerCase(), login]));
   const known = new Set(config.brains);
   for (const grant of config.grants) {
@@ -32,5 +34,5 @@ export function bootstrapAccess(store: GrantStore, config: AccessConfig): void {
     }
   }
   const owners: BrainGrant[] = [...admins.values()].flatMap(login => config.brains.map(brain => ({ login, brain, role: 'owner' as const })));
-  store.transaction(() => store.replaceConfigured({ admins: [...admins.values()], grants: [...owners, ...config.grants] }));
+  return store.transaction(() => store.replaceConfigured({ admins: [...admins.values()], grants: [...owners, ...config.grants] }));
 }

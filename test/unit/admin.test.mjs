@@ -185,7 +185,7 @@ test('listing brains shows status and, from the running gateway, live/idle', t =
 test('an invite is activated by the first successful sign-in once the user holds a grant; disable and enable', t => {
   const s = scratch(t);
   const policy = new GrantAccessPolicy(s.grants, ['http://x/mcp', 'http://x/mcp/team']);
-  assert.deepEqual(s.service.inviteUser(ADMIN, 'Erin'), { login: 'Erin', status: 'invited', isAdmin: false });
+  assert.deepEqual(s.service.inviteUser(ADMIN, 'Erin'), { login: 'Erin', status: 'invited', isAdmin: false, kind: 'human' });
   assert.throws(() => s.service.inviteUser(ADMIN, 'erin'), rejectsWith('conflict'), 'logins are case-insensitive');
   assert.throws(() => s.service.inviteUser(ADMIN, 'not a login'), rejectsWith('invalid'));
 

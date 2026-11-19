@@ -4,8 +4,8 @@ import { isGitHubLogin, isRole, ROLES } from '../../authz/index.js';
 import { DEFAULT_BRAIN, brainDataDir, parseBrainSlug } from '../../brains/index.js';
 import type { AdminActor } from '../domain/admin-actor.js';
 import { AdminError } from '../domain/admin-error.js';
-import type { BrainView, GrantView, UserView } from '../domain/views.js';
-import type { AdminClock, AdminStore, BrainDirectories, BrainRuntime } from './ports.js';
+import type { BrainView, GrantView, ServiceAccountView, UserView } from '../domain/views.js';
+import type { AdminClock, AdminStore, AdminTokens, BrainDirectories, BrainRuntime } from './ports.js';
 
 export interface AdminServiceDeps {
   store: AdminStore;
@@ -13,6 +13,8 @@ export interface AdminServiceDeps {
   clock: AdminClock;
   /** The running gateway's registry; without it (CLI) an archived brain's child stops when idle. */
   runtime?: BrainRuntime;
+  /** Personal access tokens of service accounts (#7); without it those operations are refused. */
+  tokens?: AdminTokens;
   /**
    * A refused (`denied`) attempt is recorded once per login and action in
    * this window, so a signed-in non-admin cannot flood the audit log; every
@@ -149,9 +151,67 @@ export class AdminService {
     return this.mutate(actor, { action: 'user.enable', brain: null, target: login }, () => {
       const user = this.existingUser(login);
       if (user.status !== 'disabled') throw new AdminError('conflict', `user ${user.login} is not disabled`);
+      if (user.kind === 'service') {
+        const owner = this.deps.store.serviceAccounts().find(account => account.login.toLowerCase() === user.login.toLowerCase())?.owner ?? null;
+        if (owner === null || !this.deps.store.isAdmin(owner)) {
+          throw new AdminError('conflict', `${user.login} stays disabled: its owner ${owner ?? '(none)'} is no longer an instance admin (create a new service account)`);
+        }
+      }
       this.deps.store.setUserStatus(login, 'active');
       return { result: this.deps.store.user(login)!, meta: {} };
     });
+  }
+
+  // ---- Service accounts (#7) ----
+
+  listServiceAccounts(actor: AdminActor): ServiceAccountView[] {
+    this.authorize(actor, { action: 'service_account.list', brain: null, target: null });
+    return this.deps.store.serviceAccounts();
+  }
+
+  /**
+   * Creates an active service account owned by the acting admin (the CLI
+   * names one: `owner`). It never signs in; an admin gives it API grants and
+   * personal access tokens, and disables it like any user.
+   */
+  createServiceAccount(actor: AdminActor, login: string, owner?: string): ServiceAccountView {
+    return this.mutate(actor, { action: 'service_account.create', brain: null, target: login }, () => {
+      requireLogin(login);
+      const ownerLogin = actor.kind === 'user' ? actor.login : owner;
+      if (ownerLogin === undefined) throw new AdminError('invalid', 'a service account needs an owner: the instance admin responsible for it (--owner)');
+      if (!this.deps.store.isAdmin(ownerLogin)) throw new AdminError('invalid', `the owner ${JSON.stringify(ownerLogin)} must be an active instance admin`);
+      if (this.deps.store.user(login)) throw new AdminError('conflict', `user ${login} already exists`);
+      this.deps.store.insertServiceAccount(login, ownerLogin);
+      return { result: this.deps.store.serviceAccounts().find(account => account.login.toLowerCase() === login.toLowerCase())!, meta: {} };
+    });
+  }
+
+  listServiceAccountTokens(actor: AdminActor, login: string): object[] {
+    return this.withTokens(actor, 'service_account.token.list', login, tokens => tokens.list(login));
+  }
+
+  /** The secret is in the result, and nowhere else. The tokens module audits the creation. */
+  createServiceAccountToken(actor: AdminActor, login: string, request: { name: unknown; brains: unknown; scope: unknown; expiresInDays: unknown }): { token: string; id: number } {
+    return this.withTokens(actor, 'service_account.token.create', login, tokens => tokens.create(actor, login, request));
+  }
+
+  revokeServiceAccountToken(actor: AdminActor, login: string, id: number): object {
+    return this.withTokens(actor, 'service_account.token.revoke', login, tokens => tokens.revoke(actor, login, id));
+  }
+
+  private withTokens<T>(actor: AdminActor, action: string, login: string, work: (tokens: AdminTokens) => T): T {
+    this.authorize(actor, { action, brain: null, target: login });
+    const tokens = this.deps.tokens;
+    if (!tokens) throw new AdminError('invalid', 'personal access tokens are not available here');
+    requireLogin(login);
+    if (this.deps.store.user(login)?.kind !== 'service') throw new AdminError('not_found', `unknown service account ${JSON.stringify(login)}`);
+    try {
+      return work(tokens);
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (code === 'invalid' || code === 'not_found' || code === 'conflict') throw new AdminError(code, (error as Error).message);
+      throw error;
+    }
   }
 
   // ---- Grants ----

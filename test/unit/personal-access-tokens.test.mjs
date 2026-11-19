@@ -55,7 +55,7 @@ function everyValue(db) {
 
 test('migration 8 adds personal_access_tokens on top of connections: one row per token connection, keyed by hash, gone with its connection', t => {
   const s = setup(t);
-  assert.equal(GATEWAY_SCHEMA_VERSION, 8);
+  assert.ok(GATEWAY_SCHEMA_VERSION >= 8);
   const { token, pat } = s.create('dev');
   const connectionId = s.pats.authenticate(token).connectionId;
   assert.throws(() => s.db.prepare("UPDATE personal_access_tokens SET scope = 'write' WHERE id = ?").run(pat.id), /CHECK constraint/);

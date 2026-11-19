@@ -10,6 +10,8 @@
 //   - revoked and expired tokens get 401 with the standard WWW-Authenticate
 //   - revoking the owner's grant, then disabling the owner, block the token
 //     on the next request
+//   - a service account works through its own grants and PAT, never signs
+//     in, and disabling it blocks its token
 //   - the gateway database holds no token secret; refusals are audited
 // Scratch state lives outside the repository and is kept (its path is printed).
 
@@ -19,7 +21,7 @@ import { mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  assert, assertEqual, cookieHeader, freePort, githubEnv, githubLogin, mcpCall, mcpToolsList, repoRoot, request, startFakeGitHub, startGateway
+  assert, assertEqual, cookieHeader, setCookies, sleep, freePort, githubEnv, githubLogin, mcpCall, mcpToolsList, repoRoot, request, startFakeGitHub, startGateway
 } from './lib/harness.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'engram-gateway-pats-'));
@@ -27,6 +29,18 @@ let passed = 0;
 const ok = label => { passed += 1; console.log(`  ok - ${label}`); };
 const toolText = result => (result?.result?.content ?? []).map(part => part.text ?? '').join('\n');
 const bearer = token => ({ authorization: `Bearer ${token}` });
+
+/** A device sign-in as a browser does it, ending on the page the browser lands on. */
+async function signInPage(base, github, login) {
+  const headers = { 'x-forwarded-for': '198.18.250.1' };
+  const started = await request(base, { method: 'POST', path: '/oauth/login', headers: { ...headers, origin: base }, form: { return_to: '/' } });
+  const jar = setCookies(started);
+  const device = await request(base, { path: '/oauth/device', headers: { ...headers, cookie: cookieHeader(jar) } });
+  github.approve(/class="user-code">([A-Z0-9-]+)</.exec(device.text)?.[1], login);
+  await sleep(1100);
+  await request(base, { method: 'POST', path: '/oauth/device/poll', headers: { ...headers, accept: 'text/html', origin: base, cookie: cookieHeader(jar) } });
+  return request(base, { path: '/oauth/device', headers: { ...headers, cookie: cookieHeader(jar) } });
+}
 
 async function checkPats(github) {
   const port = await freePort();
@@ -106,8 +120,22 @@ async function checkPats(github) {
     assertEqual((await mcpToolsList(base, '/mcp', bearer(writing.body.token))).status, 401, 'a disabled owner\'s PAT gets 401');
     ok('revoking the owner\'s grant or disabling the owner blocks the PAT on the next request');
 
+    // --- service accounts: their own grants and PATs; never a sign-in; disabling blocks their tokens ---
+    cli('service-accounts', 'create', 'ci-bot', '--owner', 'FullFran');
+    cli('grants', 'set', 'ci-bot', 'default', 'writer');
+    const botToken = cli('tokens', 'create', 'ci-bot', '--name', 'deploy', '--brains', 'default', '--scope', 'read+write', '--expires', '30').trim().split('\n').at(-1);
+    const botSaved = await mcpCall(base, '/mcp', 'mem_save', { title: `${marker}-bot`, content: `service account wrote ${marker}`, type: 'discovery' }, bearer(botToken));
+    assert(botSaved.result?.result && !botSaved.result.result.isError, `a service account's PAT saves: ${botSaved.text.slice(0, 200)}`);
+    assertEqual((await githubLogin(base, github, 'ci-bot')).jar, null, 'a GitHub user with the service account\'s login cannot sign in');
+    const refusal = await signInPage(base, github, 'ci-bot');
+    assertEqual(refusal.status, 403, 'refusal page');
+    assert(refusal.text.includes('ci-bot is a service account of this gateway: it uses personal access tokens and cannot sign in'), `the page says why: ${refusal.text.slice(0, 400)}`);
+    cli('users', 'disable', 'ci-bot');
+    assertEqual((await mcpToolsList(base, '/mcp', bearer(botToken))).status, 401, 'a disabled service account\'s PAT gets 401');
+    ok('a service account uses its own grants through its PAT, never signs in, and disabling it blocks the token');
+
     // --- hashes only; audit rows without token material ---
-    for (const token of [reading.body.token, writing.body.token, expiring.body.token]) {
+    for (const token of [reading.body.token, writing.body.token, expiring.body.token, botToken]) {
       const db = new DatabaseSync(join(dataDir, 'gateway.db'), { readOnly: true });
       try {
         const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name);
