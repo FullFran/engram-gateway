@@ -51,9 +51,11 @@ export const TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(Object.a
  * Kept apart from TOOL_ROLES, which mirrors engram's own tools exactly.
  *
  * - brain_health: owner (instance admins own every brain).
+ * - brain_resolve: reader (maps a git remote to a brain the caller can already use).
  */
 export const GATEWAY_TOOL_ROLES: Readonly<Record<string, Role>> = Object.freeze(Object.assign(Object.create(null) as Record<string, Role>, {
-  brain_health: 'owner'
+  brain_health: 'owner',
+  brain_resolve: 'reader'
 } satisfies Record<string, Role>));
 
 /**

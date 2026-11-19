@@ -31,7 +31,7 @@ import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, b
 import { createConnectionServer, createEngramBridge } from './bridge/index.js';
 import { ConnectionAdmin, ConnectionConsentService, SqliteConnectionStore } from './connections/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
-import { createBrainHealthTool, createConnectionTools, createGatewayToolSet } from './gateway-tools/index.js';
+import { createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet } from './gateway-tools/index.js';
 import { createEngramBrainHealthService } from './health/index.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
 import { createGatewayApp } from './http/app.js';
@@ -120,7 +120,10 @@ async function main(): Promise<void> {
   // Connection tools (#27): checked against engram's and the gateway's names, served only on the bare /mcp.
   const connectionAdmin = new ConnectionAdmin(grants, connections);
   const connectionTools = createGatewayToolSet(createConnectionTools(connectionAdmin), { engram: { ...TOOL_ROLES, ...GATEWAY_TOOL_ROLES }, gateway: CONNECTION_TOOL_KINDS });
-  const gatewayTools = createGatewayToolSet([createBrainHealthTool(health)], { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES });
+  const gatewayTools = createGatewayToolSet(
+    [createBrainHealthTool(health), createBrainResolveTool({ rules: config.brainRemotes, connections: connectionAdmin })],
+    { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES }
+  );
 
   const command = process.env.ENGRAM_BIN?.trim() || 'engram';
   const args = (process.env.ENGRAM_ARGS?.trim() || 'mcp').split(/\s+/);
