@@ -34,7 +34,7 @@ import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, b
 import type { Brain } from './brains/index.js';
 import { createConnectionServer, createEngramBridge } from './bridge/index.js';
 import {
-  ConnectionAdmin, ConnectionConsentService, PersonalAccessTokens, adminPatPort, SqliteConnectionStore, SqlitePatStore, createAccountRouter, nodePatSecrets, patIdentityProvider
+  ConnectionAdmin, ConnectionConsentService, OwnConnections, PersonalAccessTokens, adminPatPort, SqliteConnectionStore, SqlitePatStore, createAccountRouter, nodePatSecrets, patIdentityProvider
 } from './connections/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
 import { BRAIN_RESOLVE_TOOL, createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet } from './gateway-tools/index.js';
@@ -279,6 +279,7 @@ async function main(): Promise<void> {
         origin: new URL(auth.settings.issuer).origin,
         isAdmin: login => grants.isAdmin(login),
         tokens: pats,
+        connections: new OwnConnections({ store: connections, grants, clock: { nowMs: () => Date.now() } }),
         brainsOf: login => grants.grantsOf(login),
         clock: { nowMs: () => Date.now() },
         logger

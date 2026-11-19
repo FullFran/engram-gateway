@@ -1,3 +1,4 @@
+import type { AuditEvent } from '../../audit/domain/audit-event.js';
 import type { Role } from '../../authz/domain/role.js';
 import type { Connection, ConnectionChoice } from '../domain/connection.js';
 
@@ -40,7 +41,10 @@ export interface ConnectionStore extends ConnectionReader {
    * `makeDefault` also makes it the default brain. The caller has already
    * checked the role against the owner's grant.
    */
-  attach(connectionId: number, brain: string, role: Role, makeDefault: boolean): void;
+  /** `audit`, when given, is written in the same transaction. */
+  attach(connectionId: number, brain: string, role: Role, makeDefault: boolean, audit?: AuditEvent): void;
   /** Detaches `brain`; false when it was not attached. Detaching the default brain leaves the connection without one. */
-  detach(connectionId: number, brain: string): boolean;
+  detach(connectionId: number, brain: string, audit?: AuditEvent): boolean;
+  /** Every connection of `login` (OAuth and token), oldest first. */
+  listOwned(login: string): Connection[];
 }

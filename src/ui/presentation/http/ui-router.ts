@@ -2,11 +2,12 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { isSameOrigin } from '../../../auth/index.js';
 import type { Role } from '../../../authz/index.js';
-import { PatError, patJson } from '../../../connections/index.js';
-import type { PersonalAccessTokens } from '../../../connections/index.js';
+import { OwnConnectionError, PatError, patJson } from '../../../connections/index.js';
+import type { OwnConnections, PersonalAccessTokens } from '../../../connections/index.js';
 import type { Logger } from '../../../shared/logger.js';
 import { CsrfTokens } from './csrf.js';
 import { renderBarePage, renderPage, securityHeaders } from './layout.js';
+import { connectionsContent } from './views/connections.js';
 import { tokensContent } from './views/tokens.js';
 import type { TokensView } from './views/tokens.js';
 
@@ -28,6 +29,7 @@ export interface UiRouterOptions {
   origin: string;
   isAdmin(login: string): boolean;
   tokens: PersonalAccessTokens;
+  connections: OwnConnections;
   /** The user's grants: the brains a token of theirs may use. */
   brainsOf(login: string): { brain: string; role: Role }[];
   clock: { nowMs(): number };
@@ -167,6 +169,29 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
       sendTokens(res, STATUS[error.code], { error: error.message });
     }
   });
+
+  // ---- My connections (#27) ----
+  const sendConnections = (res: Response, status: number, error?: string) => {
+    const { session, csrf } = ctx(res);
+    send(res, status, 'My connections', '/ui/connections', connectionsContent({ csrf, connections: options.connections.list(session.login), ...(error ? { error } : {}) }));
+  };
+  const connectionChange = (change: (actor: { kind: 'user'; login: string }, id: number, body: Record<string, unknown>) => void) =>
+    (req: Request, res: Response) => {
+      const id = /^\d{1,15}$/.test(req.params.id ?? '') ? Number(req.params.id) : NaN;
+      try {
+        change({ kind: 'user', login: ctx(res).session.login }, id, (req.body ?? {}) as Record<string, unknown>);
+        res.redirect(303, '/ui/connections');
+      } catch (error) {
+        if (!(error instanceof OwnConnectionError)) throw error;
+        sendConnections(res, STATUS[error.code], error.message);
+      }
+    };
+
+  router.get('/connections', (_req, res) => sendConnections(res, 200));
+  router.post('/connections/:id/attach', connectionChange((actor, id, body) =>
+    options.connections.attach(actor, id, text(body.brain), body.role, body.default === 'on')));
+  router.post('/connections/:id/detach', connectionChange((actor, id, body) =>
+    options.connections.detach(actor, id, text(body.brain))));
 
   router.use((_req, res) => {
     send(res, 404, 'Page not found', '', '<h1>Page not found</h1><p><a href="/ui">Back to the panel</a></p>');
