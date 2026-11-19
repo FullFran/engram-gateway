@@ -151,6 +151,12 @@ export class AdminService {
     return this.mutate(actor, { action: 'user.enable', brain: null, target: login }, () => {
       const user = this.existingUser(login);
       if (user.status !== 'disabled') throw new AdminError('conflict', `user ${user.login} is not disabled`);
+      if (user.kind === 'service') {
+        const owner = this.deps.store.serviceAccounts().find(account => account.login.toLowerCase() === user.login.toLowerCase())?.owner ?? null;
+        if (owner === null || !this.deps.store.isAdmin(owner)) {
+          throw new AdminError('conflict', `${user.login} stays disabled: its owner ${owner ?? '(none)'} is no longer an instance admin (create a new service account)`);
+        }
+      }
       this.deps.store.setUserStatus(login, 'active');
       return { result: this.deps.store.user(login)!, meta: {} };
     });

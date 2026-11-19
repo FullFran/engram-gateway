@@ -81,8 +81,14 @@ async function main(): Promise<void> {
   // (owners of every brain) and BRAIN_GRANTS everyone else's roles; both are
   // written to the gateway database at start and read on every request.
   const grants = new SqliteGrantRepository(db);
+  const auditLog = new SqliteAuditLog(db);
   if (authConfig.mode === 'oauth') {
-    bootstrapAccess(grants, { admins: parseAdminLogins(process.env.ALLOWED_GITHUB_LOGINS), grants: brainGrants, brains: brains.map(brain => brain.slug) });
+    const access = bootstrapAccess(grants, { admins: parseAdminLogins(process.env.ALLOWED_GITHUB_LOGINS), grants: brainGrants, brains: brains.map(brain => brain.slug) });
+    // Service accounts (#7) whose owner left ALLOWED_GITHUB_LOGINS: disabled, logged and audited.
+    for (const login of access.disabledServiceAccounts) {
+      logger.warn('Service account disabled: its owner is no longer an instance admin', { login });
+      auditLog.append({ atMs: Date.now(), actor: { kind: 'system', id: 'startup' }, brain: null, action: 'service_account.disable', target: login, outcome: 'ok', durationMs: null, meta: { reason: 'owner_not_admin' } });
+    }
   } else if (brainGrants.length > 0) {
     logger.warn('BRAIN_GRANTS is ignored: authentication is off, so every caller may use every tool on every brain');
   }
@@ -91,7 +97,6 @@ async function main(): Promise<void> {
   const connections = new SqliteConnectionStore(db);
   // Personal access tokens (#7): token connections with a hashed secret,
   // used as a Bearer on /mcp; managed from /account/api and the admin CLI.
-  const auditLog = new SqliteAuditLog(db);
   const pats = new PersonalAccessTokens({
     store: new SqlitePatStore(db, connections), grants, secrets: nodePatSecrets, clock: { nowMs: () => Date.now() }, audit: auditLog,
     onAuditError: error => logger.error('Audit log write failed for a refused personal access token', { reason: (error as Error).message })

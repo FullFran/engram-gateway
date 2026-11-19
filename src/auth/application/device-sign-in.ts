@@ -157,7 +157,8 @@ export class DeviceSignIn {
               next.outcome = { kind: 'success', login: result.login };
             } else {
               this.logger.warn('GitHub login not allowed (not in the allowlist)', { login: result.login });
-              next.outcome = { kind: 'not_allowed', login: result.login };
+              const message = this.policy.signInRefusal?.(result.login);
+              next.outcome = message ? { kind: 'not_allowed', login: result.login, message } : { kind: 'not_allowed', login: result.login };
             }
             break;
         }

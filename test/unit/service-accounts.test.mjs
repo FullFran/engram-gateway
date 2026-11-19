@@ -86,6 +86,45 @@ test('a service account can never sign in, even with a grant; it is never an ins
   assert.equal(s.grants.roleOf('dev', 'alpha'), 'reader', 'configuration kept as it was');
 });
 
+test('sign-in refused because the login is a service account: the policy gives a clear reason; a person refused otherwise gets none', t => {
+  const s = setup(t);
+  s.service.createServiceAccount(ADMIN, 'ci-bot');
+  const policy = new GrantAccessPolicy(s.grants, ['http://gw/mcp']);
+  assert.match(policy.signInRefusal('ci-bot'), /ci-bot is a service account of this gateway: it uses personal access tokens and cannot sign in/);
+  assert.equal(policy.signInRefusal('stranger'), undefined);
+  assert.equal(policy.signInRefusal('dev'), undefined);
+});
+
+test('BRAIN_GRANTS may grant a service account a role (a configuration grant); it still never signs in', t => {
+  const s = setup(t);
+  s.service.createServiceAccount(ADMIN, 'ci-bot');
+  s.configure({ grants: [{ login: 'dev', brain: 'alpha', role: 'reader' }, { login: 'ci-bot', brain: 'beta', role: 'reader' }] });
+  assert.equal(s.grants.roleOf('ci-bot', 'beta'), 'reader');
+  assert.equal(new GrantAccessPolicy(s.grants, ['http://gw/mcp']).maySignIn('ci-bot'), false);
+  assert.equal(s.db.prepare("SELECT kind FROM users WHERE github_login = 'ci-bot'").get().kind, 'service', 'the configuration does not turn it into a person');
+});
+
+test('a service account whose owner is no longer an instance admin is disabled at startup; its PATs get 401 and it cannot be enabled', t => {
+  const s = setup(t);
+  s.configure({ admins: ['boss', 'boss2'] });
+  s.service.createServiceAccount({ kind: 'user', login: 'boss2' }, 'orphan-bot');
+  s.service.createServiceAccount(ADMIN, 'kept-bot');
+  for (const login of ['orphan-bot', 'kept-bot']) s.service.setGrant(ADMIN, login, 'alpha', 'reader');
+  const orphanPat = s.service.createServiceAccountToken(ADMIN, 'orphan-bot', tokenRequest({ scope: 'read' }));
+  const keptPat = s.service.createServiceAccountToken(ADMIN, 'kept-bot', tokenRequest({ scope: 'read' }));
+  assert.deepEqual(s.configure({ admins: ['boss'] }), { disabledServiceAccounts: ['orphan-bot'] });
+  assert.deepEqual(s.service.listServiceAccounts(ADMIN), [
+    { login: 'kept-bot', status: 'active', owner: 'boss' }, { login: 'orphan-bot', status: 'disabled', owner: 'boss2' }
+  ]);
+  assert.deepEqual(s.pats.authenticate(orphanPat.token), { kind: 'invalid', reason: 'owner_disabled' });
+  assert.equal(s.pats.authenticate(keptPat.token).kind, 'ok');
+  assert.throws(() => s.service.enableUser(ADMIN, 'orphan-bot'), rejectsWith('conflict', /its owner boss2 is no longer an instance admin/));
+  assert.deepEqual(s.configure({ admins: ['boss'] }), { disabledServiceAccounts: [] }, 'already disabled: reported once');
+  // The owner back as an admin: it may be enabled again.
+  s.configure({ admins: ['boss', 'boss2'] });
+  assert.equal(s.service.enableUser(ADMIN, 'orphan-bot').status, 'active');
+});
+
 test('a service account\'s PATs: created by an admin within its grants, used like any PAT, blocked by disable and by grant revoke', t => {
   const s = setup(t);
   s.service.createServiceAccount(ADMIN, 'ci-bot');

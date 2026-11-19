@@ -62,6 +62,8 @@ export interface IdentityProvider {
 export interface AccessPolicy {
   /** May this GitHub login hold a session at all? */
   maySignIn(login: string): boolean;
+  /** Why `login` may not sign in, when the policy has a specific reason to show the person; undefined for the generic refusal. */
+  signInRefusal?(login: string): string | undefined;
   /** A protected resource (RFC 8707 audience) of this server, with its name for the consent page. */
   describeResource(resource: string): { name: string } | undefined;
   /** May `login` use `resource`? */

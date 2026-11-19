@@ -27,6 +27,13 @@ export class GrantAccessPolicy implements AccessPolicy {
     return this.grants.admitSignIn(login);
   }
 
+  signInRefusal(login: string): string | undefined {
+    if (this.grants.isServiceAccount(login)) {
+      return `${login} is a service account of this gateway: it uses personal access tokens and cannot sign in. If this is your GitHub account, ask an admin.`;
+    }
+    return undefined;
+  }
+
   describeResource(resource: string): { name: string } | undefined {
     return this.resources.includes(resource) ? { name: 'Engram memory' } : undefined;
   }

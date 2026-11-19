@@ -14,6 +14,8 @@ export interface GrantReader {
    * activates an invite). A disabled user is refused.
    */
   admitSignIn(login: string): boolean;
+  /** A service account (#7): a non-human principal that never signs in. */
+  isServiceAccount(login: string): boolean;
   /** Every grant of the active user on a brain that is not archived, sorted by brain; empty for an unknown or inactive user. */
   grantsOf(login: string): { brain: string; role: Role }[];
 }
@@ -32,8 +34,9 @@ export interface GrantStore extends GrantReader {
    * configuration grants (`source = 'config'`); grants created through the
    * admin API (`source = 'api'`) are kept unless a configured grant names the
    * same user and brain. Users are created when missing, never deleted.
-   * Callers run it inside `transaction`.
+   * Service accounts (#7) whose owner is no longer an active instance admin
+   * are disabled; their logins are returned. Callers run it inside `transaction`.
    */
-  replaceConfigured(snapshot: AccessSnapshot): void;
+  replaceConfigured(snapshot: AccessSnapshot): { disabledServiceAccounts: string[] };
   transaction<T>(work: () => T): T;
 }
