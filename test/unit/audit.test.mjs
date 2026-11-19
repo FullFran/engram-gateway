@@ -97,6 +97,13 @@ test('meta keeps denyReason only as one of the closed deny reasons', () => {
   }
 });
 
+test('meta keeps role only as reader, writer or owner (the role connection_attach asked for)', () => {
+  for (const role of ['reader', 'writer', 'owner']) assert.deepEqual(toAuditMeta({ role }), { role }, role);
+  for (const role of ['admin', 'Owner', 'owner ', '', 2, { a: 1 }, 'ignore previous instructions']) {
+    assert.deepEqual(toAuditMeta({ role }), {}, String(role));
+  }
+});
+
 test('brain is nullable and any opaque string', t => {
   const { db, log } = openLog(t);
   log.append(event({ brain: null }));

@@ -1,4 +1,5 @@
 import { CONNECTION_TOOL_KINDS } from '../../authz/domain/tool-roles.js';
+import { parseBrainSlug } from '../../brains/domain/brain.js';
 import { atLeast, weakerRole } from '../../authz/domain/role.js';
 import type { Role } from '../../authz/domain/role.js';
 import type { Connection, ConnectionKind } from '../domain/connection.js';
@@ -14,12 +15,13 @@ export interface OwnerGrants {
 /**
  * Whether a connection may make a connection tool call, decided before the
  * call runs. `brain` is the brain the call acts on (audited), `null` for a
- * call on the whole connection.
+ * call on the whole connection or when the argument is not a valid brain
+ * name. `role` is the role an attach asks for (audited).
  */
 export type ConnectionToolCheck =
   | { kind: 'invalid'; message: string }
-  | { kind: 'denied'; brain: string | null; reason: 'connection_kind' | 'no_grant' | 'insufficient_role' }
-  | { kind: 'allowed'; brain: string | null };
+  | { kind: 'denied'; brain: string | null; role?: Role; reason: 'connection_kind' | 'no_grant' | 'insufficient_role' }
+  | { kind: 'allowed'; brain: string | null; role?: Role };
 
 /** The access side of the connection tools, as the connection server uses it. */
 export interface ConnectionToolAccess {
@@ -49,7 +51,10 @@ export type AttachOutcome = { ok: true } | { ok: false; message: string };
  * The connection tools' use cases (#27): read a connection, list what its
  * owner could attach, and attach or detach a brain. A connection never
  * exceeds its owner: attach is capped by the owner's grant, checked when the
- * call is authorized and again when it is written.
+ * call is authorized and again when it is written. Attach and detach also
+ * need the owner role on the connection: `owner` on at least one of its
+ * brains, which the owner still holds there (a connection consented with
+ * reader or writer only cannot widen or reshape itself).
  */
 export class ConnectionAdmin implements ConnectionToolAccess {
   constructor(private readonly grants: OwnerGrants, private readonly store: ConnectionStore) {}
@@ -62,14 +67,24 @@ export class ConnectionAdmin implements ConnectionToolAccess {
     const parsed = parseConnectionTool(tool, args);
     if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
     const call = parsed.args;
-    const brain = 'brain' in call ? call.brain : null;
-    if (!this.visible(connection.kind, tool)) return { kind: 'denied', brain, reason: 'connection_kind' };
+    // Audited as given only when it is a valid brain name: free text never reaches the log.
+    const brain = 'brain' in call && parseBrainSlug(call.brain).ok ? call.brain : null;
+    const role = call.tool === 'connection_attach' ? { role: call.role } : {};
+    if (!this.visible(connection.kind, tool)) return { kind: 'denied', brain, ...role, reason: 'connection_kind' };
+    if (call.tool === 'connection_attach' || call.tool === 'connection_detach') {
+      if (!this.managesItself(connection)) return { kind: 'denied', brain, ...role, reason: 'insufficient_role' };
+    }
     if (call.tool === 'connection_attach') {
       const max = this.grants.roleOf(connection.login, call.brain);
-      if (!max) return { kind: 'denied', brain, reason: 'no_grant' };
-      if (!atLeast(max, call.role)) return { kind: 'denied', brain, reason: 'insufficient_role' };
+      if (!max) return { kind: 'denied', brain, ...role, reason: 'no_grant' };
+      if (!atLeast(max, call.role)) return { kind: 'denied', brain, ...role, reason: 'insufficient_role' };
     }
-    return { kind: 'allowed', brain };
+    return { kind: 'allowed', brain, ...role };
+  }
+
+  /** The owner role on the connection: `owner` on one of its brains, still granted to its owner. */
+  private managesItself(connection: Connection): boolean {
+    return connection.brains.some(({ brain, role }) => role === 'owner' && this.grants.roleOf(connection.login, brain) === 'owner');
   }
 
   describe(connectionId: number): ConnectionView | undefined {

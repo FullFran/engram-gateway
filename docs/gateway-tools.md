@@ -39,7 +39,11 @@ connection tools (#12, #27) build on the same mechanism.
   caller's connection (`caller.connectionId`), not on a brain, so they have no
   brain role: `CONNECTION_TOOL_KINDS` (`src/authz`) lists the connection kinds
   that may call each, and `ConnectionAdmin.check` (`src/connections`) replaces
-  the authorize stage for them (kind, then the owner's grant for attach).
+  the authorize stage for them (kind; for attach and detach, the owner role on
+  the connection, i.e. `owner` on one of its brains still granted to the
+  owner; for attach, the owner's grant). The audited brain is `null` when the
+  argument is not a valid brain name, and an attach row records the role
+  asked for (`meta.role`, one of `reader`, `writer`, `owner`).
   The other stages run as usual; the audited brain is the one the call acts
   on.
 

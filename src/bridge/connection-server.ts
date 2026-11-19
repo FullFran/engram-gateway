@@ -128,6 +128,7 @@ export function createConnectionServer(opts: ConnectionServerOptions): McpServer
     const verdict = access.check(connection, request.name, request.arguments);
     if (verdict.kind === 'invalid') throw invalid(verdict.message);
     const authorize: RequestStage = ctx => {
+      if (verdict.role) ctx.meta.role = verdict.role;
       if (verdict.kind === 'denied') {
         ctx.meta.denyReason = verdict.reason;
         throw new ToolCallDeniedError(request.name, verdict.reason);

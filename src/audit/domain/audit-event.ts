@@ -36,6 +36,7 @@ export type AuditErrorKind = 'forward_failed' | 'tool_error';
 /** String-valued meta keys allowed through, all ids; any other string is dropped. */
 const ID_KEYS = new Set(['observationId', 'clientId', 'errorKind', 'sessionId']);
 /** Why the authorize stage refused a call (#6; `connection_kind`: a connection tool its connection kind may not call, #27). Any other value is dropped. */
+const AUDIT_ROLES: ReadonlySet<string> = new Set(['reader', 'writer', 'owner']);
 export const DENY_REASONS: ReadonlySet<string> = new Set(['no_grant', 'unknown_tool', 'insufficient_role', 'no_caller', 'connection_kind']);
 const META_KEY = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const ID_VALUE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -64,6 +65,9 @@ export function toAuditMeta(input: Record<string, unknown>): AuditMeta {
     if (!META_KEY.test(key)) continue;
     if (key === 'denyReason') {
       if (typeof value === 'string' && DENY_REASONS.has(value)) meta[key] = value;
+    } else if (key === 'role') {
+      // The role a connection tool asked for (connection_attach): a closed set.
+      if (typeof value === 'string' && AUDIT_ROLES.has(value)) meta[key] = value;
     } else if (isCount(value) || typeof value === 'boolean') {
       meta[key] = value;
     } else if (typeof value === 'string') {

@@ -35,7 +35,12 @@ const ALL = ['default', 'alpha', 'beta', 'gamma', 'slow'];
  * `kind`: a `token` connection (default) or an `oauth` one; `tools`: serve
  * the connection tools (brain_list, connection_*).
  */
-async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefault = true, maxFanOutsPerLogin, kind = 'token', tools = false } = {}) {
+/** The connection most tests use: no `owner` role, so it cannot manage its own brains. */
+const CHOICE = { name: 'c', defaultBrain: 'alpha', brains: [{ brain: 'alpha', role: 'reader' }, { brain: 'beta', role: 'writer' }] };
+/** Owner on `slow`: the connection may attach and detach (#27: owner role on the connection). */
+const MANAGER = { name: 'c', defaultBrain: 'alpha', brains: [...CHOICE.brains, { brain: 'slow', role: 'owner' }] };
+
+async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefault = true, maxFanOutsPerLogin, kind = 'token', tools = false, choice = CHOICE } = {}) {
   const BRAINS = withDefault ? ALL : ALL.filter(slug => slug !== 'default');
   const dir = mkdtempSync(join(tmpdir(), 'engram-gateway-connection-routing-'));
   const db = openGatewayDatabase(join(dir, 'gateway.db'));
@@ -49,7 +54,6 @@ async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefau
     brains: BRAINS
   });
   const connections = new SqliteConnectionStore(db);
-  const choice = { name: 'c', defaultBrain: 'alpha', brains: [{ brain: 'alpha', role: 'reader' }, { brain: 'beta', role: 'writer' }] };
   const connectionId = kind === 'oauth' ? connections.saveOAuth('owner-o', 'c1', choice) : connections.createToken('owner-o', choice);
   const pipeline = createToolCallPipeline({
     access: createToolAccess(grants, connections),
@@ -294,6 +298,8 @@ function connectionToolsFor(grants, connections) {
 const json = result => JSON.parse(result.content.map(item => item.text).join(''));
 const auditRows = db => db.prepare('SELECT brain_id, target, outcome, meta_json FROM audit_log ORDER BY id').all()
   .map(row => [row.brain_id, row.target, row.outcome, JSON.parse(row.meta_json).denyReason]);
+const auditMeta = db => db.prepare('SELECT brain_id, target, outcome, meta_json FROM audit_log ORDER BY id').all()
+  .map(row => [row.brain_id, row.target, row.outcome, JSON.parse(row.meta_json).role]);
 const attachedRows = (db, id) => db.prepare('SELECT b.slug, cb.role FROM connection_brains cb JOIN brains b ON b.id = cb.brain_id WHERE cb.connection_id = ? ORDER BY b.slug').all(id).map(row => [row.slug, row.role]);
 
 test('connection tools are listed on /mcp without a `brain` enum; a token connection only gets the read ones', async t => {
@@ -326,21 +332,23 @@ test('brain_list: the connection\'s brains with its role and the effective role;
 });
 
 test('connection_attach adds a brain (or changes its role) and applies to the next request', async t => {
-  const g = await gateway(t, { kind: 'oauth', tools: true });
+  const g = await gateway(t, { kind: 'oauth', tools: true, choice: MANAGER });
   const client = await g.connect();
   const attached = await client.callTool({ name: 'connection_attach', arguments: { brain: 'gamma', role: 'reader' } });
   assert.ok(!attached.isError, JSON.stringify(attached));
-  assert.deepEqual(attachedRows(g.db, g.connectionId), [['alpha', 'reader'], ['beta', 'writer'], ['gamma', 'reader']]);
+  assert.deepEqual(attachedRows(g.db, g.connectionId), [['alpha', 'reader'], ['beta', 'writer'], ['gamma', 'reader'], ['slow', 'owner']]);
   const search = (await client.listTools()).tools.find(tool => tool.name === 'mem_search');
-  assert.deepEqual(brainEnum(search), ['alpha', 'beta', 'gamma', '*']);
+  assert.deepEqual(brainEnum(search), ['alpha', 'beta', 'gamma', 'slow', '*']);
   assert.equal((await client.callTool({ name: 'mem_search', arguments: { brain: 'gamma', text: 'x' } })).structuredContent.results[0].brain, 'gamma');
   await client.callTool({ name: 'connection_attach', arguments: { brain: 'alpha', role: 'writer', default: true } });
   assert.deepEqual(attachedRows(g.db, g.connectionId)[0], ['alpha', 'writer']);
   assert.deepEqual(auditRows(g.db).filter(row => row[1] === 'connection_attach'), [['gamma', 'connection_attach', 'ok', undefined], ['alpha', 'connection_attach', 'ok', undefined]]);
+  // The role asked for is in the audit row (closed set: reader, writer, owner).
+  assert.deepEqual(auditMeta(g.db).filter(row => row[1] === 'connection_attach'), [['gamma', 'connection_attach', 'ok', 'reader'], ['alpha', 'connection_attach', 'ok', 'writer']]);
 });
 
 test('connection_attach never exceeds the owner: no grant or a role above it is refused (MCP error), nothing written, audited as denied', async t => {
-  const g = await gateway(t, { kind: 'oauth', tools: true });
+  const g = await gateway(t, { kind: 'oauth', tools: true, choice: MANAGER });
   const client = await g.connect();
   g.db.prepare("UPDATE grants SET role = 'reader' WHERE brain_id = (SELECT id FROM brains WHERE slug = 'gamma')").run();
   const before = attachedRows(g.db, g.connectionId);
@@ -363,13 +371,43 @@ test('a token connection cannot attach or detach (MCP error, audited as denied, 
 });
 
 test('connection_detach removes a brain: gone from the next tools/list, calls to it refused; detaching the default brain leaves none', async t => {
-  const g = await gateway(t, { kind: 'oauth', tools: true });
+  const g = await gateway(t, { kind: 'oauth', tools: true, choice: MANAGER });
   const client = await g.connect();
   assert.ok(!(await client.callTool({ name: 'connection_detach', arguments: { brain: 'beta' } })).isError);
-  assert.deepEqual(brainEnum((await client.listTools()).tools.find(tool => tool.name === 'mem_search')), ['alpha', '*']);
+  assert.deepEqual(brainEnum((await client.listTools()).tools.find(tool => tool.name === 'mem_search')), ['alpha', 'slow', '*']);
   await assert.rejects(client.callTool({ name: 'mem_search', arguments: { brain: 'beta', text: 'x' } }), deniedCall);
   assert.equal((await client.callTool({ name: 'connection_detach', arguments: { brain: 'gamma' } })).isError, true, 'not attached: a tool error');
   await client.callTool({ name: 'connection_detach', arguments: { brain: 'alpha' } });
   assert.equal(json(await client.callTool({ name: 'brain_list', arguments: {} })).defaultBrain, null);
   await assert.rejects(client.callTool({ name: 'mem_search', arguments: { text: 'x' } }), error => /no default brain/.test(error.message));
+});
+
+test('attach and detach need the owner role on the connection: a connection with reader and writer only is refused (MCP error, audited as denied, nothing written)', async t => {
+  const g = await gateway(t, { kind: 'oauth', tools: true });
+  const client = await g.connect();
+  const before = attachedRows(g.db, g.connectionId);
+  await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'gamma', role: 'writer' } }), error => deniedCall(error) && /insufficient role/.test(error.message));
+  await assert.rejects(client.callTool({ name: 'connection_detach', arguments: { brain: 'beta' } }), error => deniedCall(error) && /insufficient role/.test(error.message));
+  assert.deepEqual(attachedRows(g.db, g.connectionId), before);
+  assert.deepEqual(auditRows(g.db), [['gamma', 'connection_attach', 'denied', 'insufficient_role'], ['beta', 'connection_detach', 'denied', 'insufficient_role']]);
+  // Read tools stay open to it.
+  assert.equal(json(await client.callTool({ name: 'brain_list', arguments: {} })).brains.length, 2);
+});
+
+test('the owner role counts only while the owner still holds it: a connection whose owner grant was lowered cannot manage', async t => {
+  const g = await gateway(t, { kind: 'oauth', tools: true, choice: MANAGER });
+  const client = await g.connect();
+  g.db.prepare("UPDATE grants SET role = 'writer' WHERE brain_id = (SELECT id FROM brains WHERE slug = 'slow')").run();
+  await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'gamma', role: 'reader' } }), error => deniedCall(error) && /insufficient role/.test(error.message));
+  assert.deepEqual(attachedRows(g.db, g.connectionId), [['alpha', 'reader'], ['beta', 'writer'], ['slow', 'owner']]);
+});
+
+test('a refused connection tool call audits the brain only when it is a valid brain name (else null)', async t => {
+  const g = await gateway(t, { kind: 'oauth', tools: true, choice: MANAGER });
+  const client = await g.connect();
+  for (const brain of ['x'.repeat(300), 'Not A Slug', '-dash']) {
+    await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain, role: 'reader' } }), deniedCall);
+  }
+  await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'unknown-brain', role: 'reader' } }), deniedCall);
+  assert.deepEqual(auditRows(g.db).map(row => row[0]), [null, null, null, 'unknown-brain']);
 });
