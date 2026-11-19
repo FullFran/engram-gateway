@@ -195,6 +195,7 @@ export function createRedactStage(opts: RedactStageOptions = {}): RequestStage {
     const { value, counts } = redactValue(ctx.request.arguments);
     if (Object.keys(counts).length === 0) return ctx;
     return {
+      ...ctx,
       request: { ...ctx.request, arguments: value as Record<string, unknown> },
       meta: { ...ctx.meta, redactions: counts }
     };

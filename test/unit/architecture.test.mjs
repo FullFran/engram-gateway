@@ -33,6 +33,14 @@ test('auth: domain is pure', () => {
   }
 });
 
+test('authz: domain is pure (the role decision has no I/O)', () => {
+  for (const file of files(join(src, 'authz', 'domain'))) {
+    for (const spec of imports(file)) {
+      assert.ok(target(file, spec).startsWith('authz/domain/'), `${relative(src, file)} imports ${spec}`);
+    }
+  }
+});
+
 test('auth: application depends only on its domain, its ports and shared', () => {
   for (const file of files(join(src, 'auth', 'application'))) {
     for (const spec of imports(file)) {

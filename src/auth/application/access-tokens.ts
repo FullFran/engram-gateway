@@ -23,8 +23,11 @@ export class AccessTokenVerifier {
     const accepted: readonly string[] = typeof resource === 'string' ? [resource] : resource;
     if (!token) return { ok: false, error: 'missing' };
     const record = this.store.getAccessToken(this.hasher.sha256Hex(token));
-    // Audience check: the token must have been issued for this resource.
-    if (!record || !accepted.includes(record.resource) || !this.policy.describeResource(record.resource) || !this.policy.mayUse(record.login, record.resource)) {
+    // Audience check: the token must have been issued for this resource, to
+    // an account that may still sign in. What the account may open on that
+    // resource (a brain grant) is the resource server's per-request check:
+    // it answers 403, not 401, once access is withdrawn.
+    if (!record || !accepted.includes(record.resource) || !this.policy.describeResource(record.resource) || !this.policy.maySignIn(record.login)) {
       return { ok: false, error: 'invalid_token' };
     }
     if (!record.scope.split(' ').includes(MEMORY_SCOPE)) return { ok: false, error: 'insufficient_scope' };

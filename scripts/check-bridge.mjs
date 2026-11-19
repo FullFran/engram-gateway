@@ -2,7 +2,7 @@
 //
 //   ENGRAM_BIN=/path/to/engram node scripts/check-bridge.mjs
 //
-// Flow: start the bridge, list tools, mem_save a unique observation, mem_search
+// Flow: start the bridge, list tools (each must have a role in TOOL_ROLES, #6), mem_save a unique observation, mem_search
 // finds it, close, start a NEW bridge on the same data dir, mem_search still
 // finds it; a mem_save carrying a fake GitHub token is stored redacted (#9);
 // results come back wrapped as data, and the wrap overhead on a real
@@ -58,6 +58,7 @@ const { createMcpHandler } = await import('@modelcontextprotocol/server');
 const { Client, StreamableHTTPClientTransport } = await import('@modelcontextprotocol/client');
 const { createEngramBridge } = await import('../dist/bridge/index.js');
 const { buildChildEnv } = await import('../dist/brains/index.js');
+const { TOOL_ROLES } = await import('../dist/authz/index.js');
 // The child gets an allowlisted env only, as the gateway builds it for a brain.
 const childEnv = buildChildEnv({ slug: 'bridge-e2e', dataDir: process.env.ENGRAM_DATA_DIR, cloudSync: false }, process.env);
 
@@ -94,6 +95,12 @@ await withBridge(async client => {
   assert.ok(names.includes('mem_search'), 'mem_search listed');
   assert.ok(client.getInstructions(), 'engram instructions forwarded');
   console.log(`tools: ${names.length}; protocol: ${client.getNegotiatedProtocolVersion()}`);
+  // Deny by default (#6): every tool engram serves needs a role in TOOL_ROLES.
+  // A new engram release adding a tool fails here until someone picks its role.
+  const unmapped = names.filter(name => !Object.hasOwn(TOOL_ROLES, name));
+  assert.deepEqual(unmapped, [], `engram tools without a role in src/authz/domain/tool-roles.ts: ${unmapped.join(', ')}`);
+  const stale = Object.keys(TOOL_ROLES).filter(name => !names.includes(name));
+  assert.deepEqual(stale, [], `TOOL_ROLES lists tools engram no longer serves: ${stale.join(', ')}`);
 
   const saved = await client.callTool({
     name: 'mem_save',
