@@ -88,6 +88,7 @@ MCP client ──HTTPS──> engram-gateway ──stdio──> engram mcp ─�
    | `GITHUB_APP_NAME` | no | Name shown on the sign-in page |
    | `ENGRAM_PROJECT` | no | Default Engram project for this memory |
    | `BRAINS` | no | Extra brains to create, e.g. `work,notes` (see [Brains](#brains)) |
+   | `BRAIN_REMOTES` | no | Git remote to brain, e.g. `github.com/my-org/*=work,github.com/me/notes=notes` (see [Brain from the git remote](#brain-from-the-git-remote)) |
    | `ENGRAM_CLOUD_SERVER`, `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_AUTOSYNC` | no | Engram Cloud sync settings, passed only to the brains in `ENGRAM_CLOUD_BRAINS` |
    | `ENGRAM_CLOUD_BRAINS` | no | Brains that sync to Engram Cloud, e.g. `default` (none by default) |
 
@@ -334,10 +335,13 @@ applies to the next request.
 - **Kinds.** `oauth` connections are made on the consent page, one per user
   and OAuth client. `token` connections (code projects, CI) get their
   issuance with personal access tokens (#7).
-- **Connection tools.** On `/mcp` the client also gets four tools that act on
+- **Connection tools.** On `/mcp` the client also gets tools that act on
   its own connection (they take no routing `brain`):
-  - `brain_list`: the connection's brains, its role and the effective role on
-    each, and the default brain.
+  - `brain_list`: the connection's brains the owner still holds a grant on,
+    its role and the effective role on each, and the default brain. A brain
+    whose grant was removed or that was archived is left out (and is no
+    longer the default).
+  - `brain_resolve`: see [Brain from the git remote](#brain-from-the-git-remote).
   - `connection_brains`: the brains the owner holds a grant on, the highest
     role the connection could get there (the owner's), and the current role
     when attached.
@@ -695,6 +699,66 @@ keyed by brain and Engram's observation id.
   the tool name.
 - **Deletes.** A successful `mem_delete` through the gateway removes the
   observation's row.
+
+### Brain from the git remote
+
+`brain_resolve { remote }` (#12) answers which brain a repository's memory
+belongs to, from its git remote and the `BRAIN_REMOTES` mapping, so an agent
+started in a repository uses the right brain without per-repository setup.
+
+- **Mapping.** `BRAIN_REMOTES` is `remote=brain[,remote=brain...]`. A remote
+  is an exact repository (any form: `https://github.com/org/repo.git`,
+  `git@github.com:org/repo.git`, `github.com/org/repo`) or a pattern for
+  every repository under a path (`github.com/my-org/*`, or `github.com/*`).
+  Remotes are compared as `host/path`, lowercase, without scheme,
+  credentials, port or `.git`. An exact remote wins over a pattern, and the
+  longest pattern wins. A bad entry stops startup naming `BRAIN_REMOTES`.
+- **Only brains the caller can use.** On a connection (bare `/mcp`), the
+  answer is one of the connection's brains still granted to its owner; on
+  `/mcp/<brain>` (or with auth off), only that brain. A remote mapped to a
+  brain the caller cannot use is answered like an unmapped one.
+- **Fails open.** The result is JSON `{ brain, source, remote }`: `source`
+  is `mapping`, `default` (unmapped, unusable or malformed remote: the
+  connection's default brain, or the `/mcp/<brain>` brain) or `none`
+  (`brain: null`, no default brain). It is never a tool error. `remote` is
+  the compared key, with no credentials.
+- On `/mcp` it is a connection tool, like `brain_list`: no `brain` argument,
+  and it works on a connection with no default brain (`brain: null` when
+  nothing matches). On `/mcp/<brain>` it is a `reader` tool
+  (`GATEWAY_TOOL_ROLES`). `brain_list` (see [Connections](#connections))
+  lists the connection's brains.
+
+**Claude Code SessionStart hook.**
+[`docs/examples/session-start-brain.mjs`](docs/examples/session-start-brain.mjs)
+reads `git remote get-url origin` in the project, calls `brain_resolve` and
+prints one line that Claude Code adds to the session context (`Engram
+memory for this repository is in brain "work": pass brain: "work" to the
+Engram memory tools.`). It strips credentials from the
+remote before sending it and fails open: no repository, no `origin`, no
+`ENGRAM_GATEWAY_URL`, a gateway that is down, slow (3 s,
+`ENGRAM_GATEWAY_TIMEOUT_MS`), refuses the token or resolves no brain all
+print nothing and exit 0, so the session always starts
+(`test/unit/session-start-hook.test.mjs`). Copy it somewhere stable and add
+it to `~/.claude/settings.json` (or the project's `.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node ~/.claude/hooks/session-start-brain.mjs", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+with `ENGRAM_GATEWAY_URL` (e.g. `https://memory.example.com/mcp`) and
+`ENGRAM_GATEWAY_TOKEN` (a connection token, see [Connections](#connections))
+in the environment Claude Code runs in. Keep the token out of the settings
+file.
 
 ### Brain health report
 

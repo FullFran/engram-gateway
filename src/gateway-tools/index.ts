@@ -8,5 +8,9 @@ export type { GatewayTool, GatewayToolCaller, GatewayToolContext, GatewayToolDef
 export { createGatewayToolSet, mergeToolLists } from './application/gateway-tool-set.js';
 export type { GatewayToolSet, ToolRoleTables } from './application/gateway-tool-set.js';
 export { BRAIN_HEALTH_TOOL, createBrainHealthTool } from './tools/brain-health.js';
+export { BRAIN_RESOLVE_TOOL, createBrainResolveTool } from './tools/brain-resolve.js';
+export type { BrainResolution, BrainResolveDeps, ResolvableConnection } from './tools/brain-resolve.js';
+export { matchRemote, normalizeRemote, parseRemoteMapping } from './application/remote-mapping.js';
+export type { RemoteRule } from './application/remote-mapping.js';
 export { CONNECTION_TOOL_NAMES, createConnectionTools } from './tools/connection-tools.js';
 export type { ConnectionAdminPort } from './tools/connection-tools.js';

@@ -33,8 +33,12 @@ export interface ConnectionToolAccess {
 export interface ConnectionView {
   connection: string;
   defaultBrain: string | null;
-  /** `effectiveRole`: the weaker of the owner's grant and the connection's role; `null` once the owner lost the grant. */
-  brains: { brain: string; role: Role; effectiveRole: Role | null }[];
+  /**
+   * The brains the connection can use now. `effectiveRole`: the weaker of the
+   * owner's grant and the connection's role. A brain whose grant the owner
+   * lost (or that was archived) is left out, and so is such a default brain.
+   */
+  brains: { brain: string; role: Role; effectiveRole: Role }[];
 }
 
 export interface AttachableBrain {
@@ -90,14 +94,12 @@ export class ConnectionAdmin implements ConnectionToolAccess {
   describe(connectionId: number): ConnectionView | undefined {
     const connection = this.store.get(connectionId);
     if (!connection) return undefined;
-    return {
-      connection: connection.name,
-      defaultBrain: connection.defaultBrain ?? null,
-      brains: connection.brains.map(({ brain, role }) => {
-        const grant = this.grants.roleOf(connection.login, brain);
-        return { brain, role, effectiveRole: grant ? weakerRole(grant, role) : null };
-      })
-    };
+    const brains = connection.brains.flatMap(({ brain, role }) => {
+      const grant = this.grants.roleOf(connection.login, brain);
+      return grant ? [{ brain, role, effectiveRole: weakerRole(grant, role) }] : [];
+    });
+    const defaultBrain = brains.some(b => b.brain === connection.defaultBrain) ? connection.defaultBrain! : null;
+    return { connection: connection.name, defaultBrain, brains };
   }
 
   attachable(connectionId: number): AttachableBrain[] | undefined {

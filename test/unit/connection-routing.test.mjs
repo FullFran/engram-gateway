@@ -15,7 +15,7 @@ import express from 'express';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { GATEWAY_TOOL_ROLES, TOOL_ROLES, SqliteGrantRepository, bootstrapAccess, createToolAccess } from '../../dist/authz/index.js';
 import { CONNECTION_TOOL_KINDS } from '../../dist/authz/index.js';
-import { createBrainHealthTool, createConnectionTools, createGatewayToolSet } from '../../dist/gateway-tools/index.js';
+import { createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet, parseRemoteMapping } from '../../dist/gateway-tools/index.js';
 import { SqliteAuditLog, toolCallRecorder } from '../../dist/audit/index.js';
 import { BrainRegistry, SqliteBrainRepository } from '../../dist/brains/index.js';
 import { createConnectionServer, createEngramBridge } from '../../dist/bridge/index.js';
@@ -40,7 +40,7 @@ const CHOICE = { name: 'c', defaultBrain: 'alpha', brains: [{ brain: 'alpha', ro
 /** Owner on `slow`: the connection may attach and detach (#27: owner role on the connection). */
 const MANAGER = { name: 'c', defaultBrain: 'alpha', brains: [...CHOICE.brains, { brain: 'slow', role: 'owner' }] };
 
-async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefault = true, maxFanOutsPerLogin, kind = 'token', tools = false, choice = CHOICE } = {}) {
+async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefault = true, maxFanOutsPerLogin, kind = 'token', tools = false, choice = CHOICE, remotes = '' } = {}) {
   const BRAINS = withDefault ? ALL : ALL.filter(slug => slug !== 'default');
   const dir = mkdtempSync(join(tmpdir(), 'engram-gateway-connection-routing-'));
   const db = openGatewayDatabase(join(dir, 'gateway.db'));
@@ -62,7 +62,10 @@ async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefau
   });
   const healthAsked = [];
   const gatewayTools = createGatewayToolSet(
-    [createBrainHealthTool({ report: brain => { healthAsked.push(brain); return { ok: false, reason: 'no_data', message: `no data for ${brain}` }; } })],
+    [
+      createBrainHealthTool({ report: brain => { healthAsked.push(brain); return { ok: false, reason: 'no_data', message: `no data for ${brain}` }; } }),
+      createBrainResolveTool({ rules: parseRemoteMapping(remotes), connections: new ConnectionAdmin(grants, connections) })
+    ],
     { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES }
   );
   /** Every lease the connection server takes, by brain. */
@@ -86,7 +89,7 @@ async function gateway(t, { fanOutTimeoutMs = 5000, slowMode = 'hang', withDefau
       brains: { has: slug => registry.has(slug), acquire: slug => { leases.push(slug); return registry.acquire(slug); } },
       connections, pipeline, gatewayTools, logger, fanOutTimeoutMs,
       ...(maxFanOutsPerLogin !== undefined ? { maxFanOutsPerLogin } : {}),
-      ...(tools ? { connectionTools: connectionToolsFor(grants, connections) } : {})
+      ...(tools ? { connectionTools: connectionToolsFor(grants, connections, parseRemoteMapping(remotes)) } : {})
     })
   });
   const server = createServer(app);
@@ -109,7 +112,7 @@ test('tools/list on /mcp: tools allowed on at least one of the connection\'s bra
   const g = await gateway(t);
   const client = await g.connect();
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['mem_save', 'mem_search'], 'mem_save: writer on beta; unmapped tools hidden');
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['brain_resolve', 'mem_save', 'mem_search'], 'mem_save: writer on beta; brain_resolve: reader; unmapped tools and brain_health (owner) hidden');
   const byName = Object.fromEntries(tools.map(tool => [tool.name, tool]));
   assert.deepEqual(brainEnum(byName.mem_save), ['alpha', 'beta']);
   assert.deepEqual(brainEnum(byName.mem_search), ['alpha', 'beta', '*'], 'a fan-out read tool also takes "*"');
@@ -183,7 +186,7 @@ test('detaching a brain applies to the next request: gone from the `brain` list,
   const client = await g.connect();
   g.db.prepare("DELETE FROM connection_brains WHERE connection_id = ? AND brain_id = (SELECT id FROM brains WHERE slug = 'beta')").run(g.connectionId);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => [tool.name, brainEnum(tool)]), [['mem_search', ['alpha', '*']]]);
+  assert.deepEqual(tools.map(tool => [tool.name, brainEnum(tool)]), [['mem_search', ['alpha', '*']], ['brain_resolve', ['alpha']]]);
   await assert.rejects(client.callTool({ name: 'mem_save', arguments: { brain: 'beta', content: 'x' } }), deniedCall);
 });
 
@@ -290,9 +293,10 @@ test('the bare /mcp serves connections when no brain is named default; a token w
 
 // --- connection tools (brain_list, connection_brains, connection_attach, connection_detach) ---
 
-function connectionToolsFor(grants, connections) {
+function connectionToolsFor(grants, connections, rules = []) {
   const access = new ConnectionAdmin(grants, connections);
-  return { tools: createGatewayToolSet(createConnectionTools(access), { engram: TOOL_ROLES, gateway: CONNECTION_TOOL_KINDS }), access };
+  const tools = [...createConnectionTools(access), createBrainResolveTool({ rules, connections: access })];
+  return { tools: createGatewayToolSet(tools, { engram: TOOL_ROLES, gateway: CONNECTION_TOOL_KINDS }), access };
 }
 /** The test pipeline does not wrap results (`wrap: passResult`): the tool's JSON as is. */
 const json = result => JSON.parse(result.content.map(item => item.text).join(''));
@@ -410,4 +414,50 @@ test('a refused connection tool call audits the brain only when it is a valid br
   }
   await assert.rejects(client.callTool({ name: 'connection_attach', arguments: { brain: 'unknown-brain', role: 'reader' } }), deniedCall);
   assert.deepEqual(auditRows(g.db).map(row => row[0]), [null, null, null, 'unknown-brain']);
+});
+
+// --- brain_resolve (#12) ---
+
+test('brain_resolve on /mcp: maps a remote to one of the connection\'s brains, else its default brain; audited, never an error', async t => {
+  const g = await gateway(t, { tools: true, remotes: 'github.com/hagalink/*=beta,github.com/hagalink/secret=gamma' });
+  const client = await g.connect();
+  const resolve = async remote => JSON.parse((await client.callTool({ name: 'brain_resolve', arguments: { remote } })).content[0].text);
+  assert.deepEqual(await resolve('git@github.com:hagalink/website.git'), { brain: 'beta', source: 'mapping', remote: 'github.com/hagalink/website' });
+  // gamma is granted to the owner but not attached to this connection.
+  assert.deepEqual(await resolve('https://github.com/hagalink/secret'), { brain: 'alpha', source: 'default', remote: 'github.com/hagalink/secret' });
+  assert.deepEqual(await resolve('https://example.org/x/y'), { brain: 'alpha', source: 'default', remote: 'example.org/x/y' });
+  assert.deepEqual(auditRows(g.db).filter(row => row[1] === 'brain_resolve'), [
+    [null, 'brain_resolve', 'ok', undefined], [null, 'brain_resolve', 'ok', undefined], [null, 'brain_resolve', 'ok', undefined]
+  ]);
+});
+
+test('brain_resolve is a connection-level tool on /mcp: listed once, no `brain` argument, works with no default brain', async t => {
+  const g = await gateway(t, { tools: true, remotes: 'github.com/hagalink/*=beta', choice: { ...CHOICE, defaultBrain: null } });
+  const client = await g.connect();
+  const listed = (await client.listTools()).tools.filter(tool => tool.name === 'brain_resolve');
+  assert.equal(listed.length, 1, 'listed once');
+  assert.ok(!('brain' in (listed[0].inputSchema.properties ?? {})), 'no routing `brain` argument');
+  const resolve = async remote => {
+    const result = await client.callTool({ name: 'brain_resolve', arguments: { remote } });
+    assert.ok(!result.isError, JSON.stringify(result));
+    return JSON.parse(result.content[0].text);
+  };
+  assert.deepEqual(await resolve('git@github.com:hagalink/website.git'), { brain: 'beta', source: 'mapping', remote: 'github.com/hagalink/website' });
+  assert.deepEqual(await resolve('https://example.org/x/y'), { brain: null, source: 'none', remote: 'example.org/x/y' });
+  // Brain tools still need a brain on this connection.
+  await assert.rejects(client.callTool({ name: 'mem_search', arguments: { text: 'x' } }), error => /no default brain/.test(error.message));
+});
+
+test('brain_list and brain_resolve hide attached brains the owner can no longer use (grant removed, brain archived)', async t => {
+  const g = await gateway(t, { tools: true, remotes: 'github.com/hagalink/*=beta', choice: { ...MANAGER, defaultBrain: 'beta' } });
+  const client = await g.connect();
+  const listed = async () => json(await client.callTool({ name: 'brain_list', arguments: {} }));
+  g.db.prepare("DELETE FROM grants WHERE brain_id = (SELECT id FROM brains WHERE slug = 'beta')").run();
+  assert.deepEqual(await listed(), {
+    connection: 'c', defaultBrain: null,
+    brains: [{ brain: 'alpha', role: 'reader', effectiveRole: 'reader' }, { brain: 'slow', role: 'owner', effectiveRole: 'owner' }]
+  });
+  assert.deepEqual(JSON.parse((await client.callTool({ name: 'brain_resolve', arguments: { remote: 'github.com/hagalink/x' } })).content[0].text), { brain: null, source: 'none', remote: 'github.com/hagalink/x' });
+  g.db.prepare("UPDATE brains SET status = 'archived' WHERE slug = 'slow'").run();
+  assert.deepEqual((await listed()).brains, [{ brain: 'alpha', role: 'reader', effectiveRole: 'reader' }]);
 });

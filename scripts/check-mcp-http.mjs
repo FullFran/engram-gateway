@@ -260,7 +260,8 @@ async function checkRoles(github) {
   const names = list => list.result.result.tools.map(tool => tool.name).sort();
   // mem_stats as plain text: the data-wrapping nonce (#19) differs on every call.
   const stats = async token => toolText((await mcpCall(base, '/mcp/alpha', 'mem_stats', {}, bearer(token))).result).replace(/nonce="[0-9a-f]+"/g, 'nonce');
-  const rolesOf = role => Object.keys(TOOL_ROLES).filter(name => TOOL_ROLES[name] === role).sort();
+  // Engram's tools and the gateway's own (brain_resolve is a reader tool, #12).
+  const rolesOf = role => Object.entries({ ...TOOL_ROLES, ...GATEWAY_TOOL_ROLES }).filter(([, required]) => required === role).map(([name]) => name).sort();
   try {
     // --- tokens: only for brains the user holds a grant on ---
     const reader = await githubLogin(base, github, 'reader-r');
@@ -282,6 +283,18 @@ async function checkRoles(github) {
     const everyTool = [...Object.keys(TOOL_ROLES), ...Object.keys(GATEWAY_TOOL_ROLES)].sort();
     assertEqual(JSON.stringify(names(await mcpToolsList(base, '/mcp/alpha', bearer(adminAlpha.accessToken)))), JSON.stringify(everyTool), 'the admin (owner) sees every engram tool and every gateway tool');
     ok('tools/list holds exactly the tools the role allows');
+    const resolved = await mcpCall(base, '/mcp/alpha', 'brain_resolve', { remote: 'git@github.com:someone/unmapped.git' }, bearer(readerAlpha.accessToken));
+    assert(toolText(resolved.result).includes('{"brain":"alpha","source":"default","remote":"github.com/someone/unmapped"}'), `brain_resolve fails open to the route's brain: ${resolved.text.slice(0, 300)}`);
+    // The README's SessionStart hook, against this gateway.
+    const hookRepo = join(scratch, 'hook-repo');
+    execFileSync('git', ['init', '-q', hookRepo]);
+    execFileSync('git', ['-C', hookRepo, 'remote', 'add', 'origin', 'git@github.com:someone/unmapped.git']);
+    const hookOut = execFileSync(process.execPath, [join(import.meta.dirname, '..', 'docs', 'examples', 'session-start-brain.mjs')], {
+      cwd: hookRepo, encoding: 'utf8', input: '{}',
+      env: { PATH: process.env.PATH ?? '', HOME: hookRepo, ENGRAM_GATEWAY_URL: `${base}/mcp/alpha`, ENGRAM_GATEWAY_TOKEN: readerAlpha.accessToken }
+    });
+    assert(hookOut.includes('brain "alpha"'), `the SessionStart hook prints the resolved brain: ${JSON.stringify(hookOut)}`);
+    ok('brain_resolve: a reader resolves an unmapped remote to the brain of /mcp/<brain> (fail open), and the SessionStart hook prints it');
 
     // --- brain_health (#18): owner tool and admin endpoint, read-only from the brain's engram.db ---
     const healthCall = await mcpCall(base, '/mcp/alpha', 'brain_health', { sampleSize: 1 }, bearer(adminAlpha.accessToken));

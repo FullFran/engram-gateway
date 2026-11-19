@@ -1,11 +1,14 @@
 import { join, resolve } from 'node:path';
 import { parsePublicBaseUrl, parseTrustProxy } from './shared/network.js';
+import { parseRemoteMapping, type RemoteRule } from './gateway-tools/index.js';
 
 export interface GatewayConfig {
   host: string;
   port: number;
   publicBaseUrl?: string;
   trustProxy: boolean | number | string;
+  /** `BRAIN_REMOTES`: git remote -> brain, for `brain_resolve` (#12). */
+  brainRemotes: RemoteRule[];
 }
 
 function readPort(name: string, raw: string | undefined, fallback: number): number {
@@ -15,6 +18,14 @@ function readPort(name: string, raw: string | undefined, fallback: number): numb
   return Number(value);
 }
 
+function readBrainRemotes(raw: string | undefined): RemoteRule[] {
+  try {
+    return parseRemoteMapping(raw);
+  } catch (error) {
+    throw new Error(`BRAIN_REMOTES: ${(error as Error).message}`);
+  }
+}
+
 /** Gateway settings from the environment (auth has its own, in `auth/`; the bridge's, in `main.ts`). */
 export function resolveGatewayConfig(env: Record<string, string | undefined>): GatewayConfig {
   const publicBaseUrl = parsePublicBaseUrl(env.PUBLIC_BASE_URL);
@@ -22,7 +33,8 @@ export function resolveGatewayConfig(env: Record<string, string | undefined>): G
     host: env.HOST?.trim() || '127.0.0.1',
     port: readPort('PORT', env.PORT, 3000),
     ...(publicBaseUrl ? { publicBaseUrl } : {}),
-    trustProxy: parseTrustProxy(env.TRUST_PROXY)
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
+    brainRemotes: readBrainRemotes(env.BRAIN_REMOTES)
   };
 }
 
