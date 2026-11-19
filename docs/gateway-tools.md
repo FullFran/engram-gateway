@@ -16,13 +16,21 @@ connection tools (#12, #27) build on the same mechanism.
   is unchanged, so gateway tools are authorized, audited and wrapped as data
   like engram's.
 - **Roles:** each gateway tool needs an entry in `GATEWAY_TOOL_ROLES`
-  (`src/authz/domain/tool-roles.ts`), or it is denied for every role.
-  `TOOL_ROLES` stays the exact table of engram's tools, which
-  `scripts/check-bridge.mjs` compares with the live engram binary.
+  (`src/authz/domain/tool-roles.ts`). `TOOL_ROLES` stays the exact table of
+  engram's tools, which `scripts/check-bridge.mjs` compares with the live
+  engram binary.
+- **Startup check:** `createGatewayToolSet(tools, { engram: TOOL_ROLES,
+  gateway: GATEWAY_TOOL_ROLES })` throws when a gateway tool has an engram
+  tool's name (it would shadow it and take over its role) or has no role (with
+  auth off the allow-all pipeline would run it unchecked).
+- **Context:** the handler gets `{ brain, caller? }`; `caller` holds `login`,
+  `clientId` and the effective `role` the authorize stage decided (absent with
+  auth off). Tools act on behalf of that caller instead of looking it up
+  around the pipeline.
 
 ## Adding a tool
 
-1. Implement `GatewayTool` (`definition` + `call(args, { brain })`) under
+1. Implement `GatewayTool` (`definition` + `call(args, { brain, caller })`) under
    `src/gateway-tools/tools/`. Return tool errors as `toolError(message)`;
    throw only for unexpected failures.
 2. Give it a role in `GATEWAY_TOOL_ROLES`.

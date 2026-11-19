@@ -4,9 +4,9 @@ import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/
 import type { McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../shared/logger.js';
 import { ToolCallDeniedError, createToolCallPipeline, runToolCall } from '../pipeline/index.js';
-import type { ToolCaller, ToolCallPipeline, ToolCallResult } from '../pipeline/index.js';
+import type { ToolCallContext, ToolCaller, ToolCallPipeline, ToolCallResult } from '../pipeline/index.js';
 import { mergeToolLists } from '../gateway-tools/index.js';
-import type { GatewayToolSet } from '../gateway-tools/index.js';
+import type { GatewayToolContext, GatewayToolSet } from '../gateway-tools/index.js';
 
 export interface EngramBridgeOptions {
   /** Executable to spawn, normally `engram`. */
@@ -67,6 +67,12 @@ function callerOf(authInfo: { clientId?: string; extra?: Record<string, unknown>
   if (!authInfo) return undefined;
   const login = authInfo.extra?.login;
   return { ...(typeof login === 'string' ? { login } : {}), ...(authInfo.clientId ? { clientId: authInfo.clientId } : {}) };
+}
+
+/** The pipeline's view of the call, as a gateway tool sees it: brain, caller and the role authorize decided. */
+function gatewayToolContext(ctx: ToolCallContext): GatewayToolContext {
+  if (!ctx.caller) return { brain: ctx.brain };
+  return { brain: ctx.brain, caller: { ...ctx.caller, ...(ctx.role !== undefined ? { role: ctx.role } : {}) } };
 }
 
 export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
@@ -159,9 +165,9 @@ export function createEngramBridge(opts: EngramBridgeOptions): EngramBridge {
       const { name, arguments: args } = request.params;
       try {
         // Gateway tools are handled here; everything else is forwarded to engram.
-        const forward = async (call: { name: string; arguments?: Record<string, unknown> }): Promise<ToolCallResult> =>
+        const forward = async (call: { name: string; arguments?: Record<string, unknown> }, ctx: ToolCallContext): Promise<ToolCallResult> =>
           gatewayTools?.has(call.name)
-            ? gatewayTools.call(call.name, call.arguments, { brain })
+            ? gatewayTools.call(call.name, call.arguments, gatewayToolContext(ctx))
             : ((await (await upstream()).callTool(call)) as ToolCallResult);
         const result = await runToolCall(pipeline, { name, ...(args !== undefined ? { arguments: args } : {}) }, forward,
         { ...(caller ? { caller } : {}), brain });

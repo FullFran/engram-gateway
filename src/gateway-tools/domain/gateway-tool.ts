@@ -15,9 +15,18 @@ export interface GatewayToolDefinition {
   annotations?: Record<string, unknown>;
 }
 
-/** What a gateway tool knows about the call: the brain it was routed to. */
+/** Who made the call, as the pipeline established it; absent when auth is off. */
+export interface GatewayToolCaller {
+  login?: string;
+  clientId?: string;
+  /** The effective role the authorize stage decided on this brain. */
+  role?: string;
+}
+
+/** What a gateway tool knows about the call: the brain it was routed to and the caller. */
 export interface GatewayToolContext {
   brain: string | null;
+  caller?: GatewayToolCaller;
 }
 
 /** A `tools/call` result; a tool error is `isError: true`, not a thrown error. */

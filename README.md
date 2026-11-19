@@ -492,7 +492,9 @@ rows, duplicate titles, unjudged pending relations and observations past
 - **Admin endpoint `GET /admin/brains/<slug>/health`**: instance admins only
   (`ALLOWED_GITHUB_LOGINS`), authenticated with a bearer token for that
   brain's resource or a session cookie; same query options. `404
-  {"error":"no_data"}` for a brain with nothing saved yet. Open when
+  {"error":"no_data"}` for a brain with nothing saved yet, `503 {"error":"busy"}`
+  when its database stays locked for more than 500 ms. Every authenticated
+  read is in the audit log as `admin.brain_health`. Open when
   authentication is off (loopback), like `/mcp`.
 
 See [docs/health-report.md](docs/health-report.md) for every finding and

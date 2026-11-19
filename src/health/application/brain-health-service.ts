@@ -32,7 +32,7 @@ export function parseHealthOptions(raw: unknown): ParsedHealthOptions {
 
 export type BrainHealthLookup =
   | { ok: true; report: BrainHealthReport & { brain: string } }
-  | { ok: false; reason: 'unknown_brain' | 'no_data' | 'invalid_arguments'; message: string };
+  | { ok: false; reason: 'unknown_brain' | 'no_data' | 'invalid_arguments' | 'busy'; message: string };
 
 /** The one entry point the `brain_health` tool and the admin endpoint share. */
 export interface BrainHealthService {
@@ -63,9 +63,18 @@ export function createBrainHealthService(deps: BrainHealthServiceDeps): BrainHea
       }
       try {
         return { ok: true, report: { brain, ...buildHealthReport(source, { ...parsed.options, now: new Date(deps.nowMs()) }) } };
+      } catch (error) {
+        if (isBusy(error)) return { ok: false, reason: 'busy', message: `brain ${brain} database is busy; retry shortly` };
+        throw error;
       } finally {
         source.close();
       }
     }
   };
+}
+
+/** SQLITE_BUSY / SQLITE_LOCKED: another connection holds a lock longer than the busy timeout. */
+function isBusy(error: unknown): boolean {
+  const code = (error as { errcode?: unknown })?.errcode;
+  return code === 5 || code === 6 || /database (table )?is locked/i.test((error as Error)?.message ?? '');
 }

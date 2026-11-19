@@ -5,6 +5,8 @@ import type { DuplicateTitlesFinding, SampledFinding, TypeCount } from '../domai
  * returns counts and at most `sampleSize` ids, lowest first.
  */
 export interface BrainHealthSource {
+  /** Runs `work` on one consistent snapshot of the data (one read transaction). */
+  snapshot<T>(work: () => T): T;
   /** Live observations per type, count descending then type ascending (all types). */
   typeCounts(): TypeCount[];
   deletedCount(): number;

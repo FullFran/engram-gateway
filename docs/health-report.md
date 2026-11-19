@@ -7,8 +7,16 @@ A per-brain report computed from the brain's `engram.db` (`src/health`).
 - **Read-only.** The database is opened with `node:sqlite` `readOnly: true`
   and `PRAGMA query_only = ON`, directly, never through the brain's
   `engram mcp` child. A WAL database that a running child holds open is read
-  at a consistent snapshot. A brain with no `engram.db` raises
-  `BrainHealthUnavailableError`; no file is created.
+  at a consistent snapshot: every query of a report runs in one read
+  transaction. A brain with no `engram.db` raises
+  `BrainHealthUnavailableError` and no database is created. For a WAL-mode
+  `engram.db`, SQLite may create its `-wal` and `-shm` files when they are
+  missing (readers need the shared-memory index); engram opens them the same
+  way, so this is harmless and `engram.db` itself is never changed.
+- **Fails fast on locks.** `node:sqlite` is synchronous, so the busy timeout
+  is 500 ms: a database locked longer than that answers `busy` (tool error,
+  or `503 {"error":"busy"}` from the admin endpoint) instead of stalling the
+  event loop.
 - **Bounded.** The report carries counts and at most `sampleSize` ids per
   finding (default 5, clamped to 0-50, lowest ids first) and at most
   `maxTypes` type rows (default 50, clamped to 0-200). It never carries
@@ -48,7 +56,9 @@ files (`wiki.db`, `vectors.db`) through new sources and replace the
 - `GET /admin/brains/<slug>/health?sampleSize=&maxTypes=`: instance admins
   only. `401` without credentials, `403` for a non-admin, `400
   {"error":"invalid_request"}` for bad options, `404` for an unknown brain or
-  `{"error":"no_data"}` for a brain without `engram.db`.
+  `{"error":"no_data"}` for a brain without `engram.db`, `503
+  {"error":"busy"}` when the database stays locked. Authenticated reads are
+  audited as action `admin.brain_health` (outcome `ok`, `error` or `denied`).
 
 Both add `brain` (the slug) to the report and go through one
 `BrainHealthService` (`src/health/application/brain-health-service.ts`).

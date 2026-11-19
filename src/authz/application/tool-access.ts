@@ -1,8 +1,9 @@
 import { decideTool } from '../domain/decision.js';
 import type { DenyReason } from '../domain/decision.js';
 import type { GrantReader } from './ports.js';
+import type { Role } from '../domain/role.js';
 
-export type AccessCheck = { allowed: true } | { allowed: false; reason: DenyReason | 'no_caller' };
+export type AccessCheck = { allowed: true; role: Role } | { allowed: false; reason: DenyReason | 'no_caller' };
 
 /** Who is calling, as the tool-call pipeline knows it. */
 export interface Caller {
@@ -25,7 +26,7 @@ export function createToolAccess(grants: GrantReader): ToolAccess {
       if (!caller?.login || !brain) return { allowed: false, reason: 'no_caller' };
       const user = grants.roleOf(caller.login, brain);
       const decision = decideTool(user ? { user } : {}, tool);
-      return decision.allowed ? { allowed: true } : { allowed: false, reason: decision.reason };
+      return decision.allowed ? { allowed: true, role: decision.role } : { allowed: false, reason: decision.reason };
     }
   };
 }

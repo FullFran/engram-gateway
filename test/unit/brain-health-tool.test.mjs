@@ -64,13 +64,37 @@ function unwrapJson(result) {
 
 test('a gateway tool set lists its definitions, calls a tool by name and refuses duplicate names', async () => {
   const echo = { definition: { name: 'gw_echo', description: 'echo', inputSchema: { type: 'object' } }, call: async (args, ctx) => ({ content: [{ type: 'text', text: `${ctx.brain}:${args.x}` }] }) };
-  const set = createGatewayToolSet([echo]);
+  const roles = { engram: TOOL_ROLES, gateway: { gw_echo: 'reader' } };
+  const set = createGatewayToolSet([echo], roles);
   assert.deepEqual(set.definitions().map(tool => tool.name), ['gw_echo']);
   assert.equal(set.has('gw_echo'), true);
   assert.equal(set.has('mem_save'), false);
   assert.deepEqual(await set.call('gw_echo', { x: 1 }, { brain: 'team' }), { content: [{ type: 'text', text: 'team:1' }] });
   await assert.rejects(set.call('nope', {}, { brain: 'team' }), /not a gateway tool/);
-  assert.throws(() => createGatewayToolSet([echo, echo]), /duplicate gateway tool gw_echo/);
+  assert.throws(() => createGatewayToolSet([echo, echo], roles), /duplicate gateway tool gw_echo/);
+});
+
+test('startup check: a gateway tool may not shadow an engram tool (it would take over its role)', () => {
+  const fakeSave = { definition: { name: 'mem_save', description: 'x', inputSchema: { type: 'object' } }, call: async () => ({ content: [] }) };
+  assert.throws(
+    () => createGatewayToolSet([fakeSave], { engram: TOOL_ROLES, gateway: { mem_save: 'reader' } }),
+    /gateway tool mem_save shadows an engram tool/,
+  );
+});
+
+test('startup check: every gateway tool needs a role in GATEWAY_TOOL_ROLES, with auth on or off', () => {
+  const orphan = { definition: { name: 'gw_orphan', description: 'x', inputSchema: { type: 'object' } }, call: async () => ({ content: [] }) };
+  assert.throws(
+    () => createGatewayToolSet([orphan], { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES }),
+    /gateway tool gw_orphan has no role in GATEWAY_TOOL_ROLES/,
+  );
+  // The real tool set as main.ts builds it passes the check.
+  const real = createGatewayToolSet([createBrainHealthTool({ report: () => ({ ok: false, reason: 'no_data', message: 'x' }) })], { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES });
+  assert.deepEqual(real.definitions().map(tool => tool.name), ['brain_health']);
+});
+
+test('the engram and gateway role tables are disjoint', () => {
+  assert.deepEqual(Object.keys(GATEWAY_TOOL_ROLES).filter(name => Object.hasOwn(TOOL_ROLES, name)), []);
 });
 
 test('merged tools/list: engram tools first, then gateway tools; a gateway tool shadows an engram tool of the same name', () => {
@@ -150,7 +174,10 @@ async function gateway(t, { auth = true } = {}) {
     audit: createAuditStage({ record: toolCallRecorder(auditLog, { nowMs: () => Date.now() }) }),
   });
   const health = createEngramBrainHealthService({ dataDirOf: slug => dataDirs[slug], nowMs: () => NOW_MS });
-  const gatewayTools = createGatewayToolSet([createBrainHealthTool(health)]);
+  const seenContexts = [];
+  const healthTool = createBrainHealthTool(health);
+  const spiedHealthTool = { ...healthTool, call: (args, ctx) => { seenContexts.push(ctx); return healthTool.call(args, ctx); } };
+  const gatewayTools = createGatewayToolSet([spiedHealthTool], { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES });
   const registry = new BrainRegistry({
     brains: new Map(slugs.map(slug => [slug, { slug, dataDir: dataDirs[slug], cloudSync: false }])),
     createProcess: brain => createEngramBridge({ command: process.execPath, args: [FAKE_ENGRAM], logger, pipeline, gatewayTools, brain: brain.slug }),
@@ -172,7 +199,11 @@ async function gateway(t, { auth = true } = {}) {
       auth: { router: express.Router(), authenticator, resource: 'http://127.0.0.1/mcp' },
       brainAccess: { mayOpen: (who, brain) => grants.roleOf(who, brain) !== undefined },
     } : {}),
-    admin: { isAdmin: login => grants.isAdmin(login), brainHealth: (slug, options) => health.report(slug, options) },
+    admin: {
+      isAdmin: login => grants.isAdmin(login),
+      brainHealth: (slug, options) => health.report(slug, options),
+      recordAccess: access => auditLog.append({ atMs: Date.now(), actor: access.login ? { kind: 'user', login: access.login } : { kind: 'system', id: 'anonymous' }, brain: access.brain, action: 'admin.brain_health', target: null, outcome: access.outcome, durationMs: null, meta: {} }),
+    },
   });
   const server = createServer(app);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -186,7 +217,7 @@ async function gateway(t, { auth = true } = {}) {
   };
   const audit = () => [...auditLog.read()].map(row => [row.actorLogin, row.brain, row.target, row.outcome]);
   const auditRows = () => [...auditLog.read()];
-  return { state, url, connect, audit, auditRows };
+  return { state, url, connect, audit, auditRows, seenContexts, dataDirs };
 }
 
 test('over MCP: an owner sees brain_health next to engram tools and gets the report; it never reaches engram and is audited', async t => {
@@ -201,6 +232,17 @@ test('over MCP: an owner sees brain_health next to engram tools and gets the rep
   assert.equal(report.brain, 'team');
   for (const [key, value] of Object.entries(EXPECTED_SEEDED)) assert.deepEqual(report[key], value, key);
   assert.deepEqual(gw.audit(), [['olive', 'team', 'brain_health', 'ok']]);
+  assert.deepEqual(gw.seenContexts, [{ brain: 'team', caller: { login: 'olive', clientId: 'c1', role: 'owner' } }], 'the handler gets the caller and the role the authorize stage decided');
+});
+
+test('over MCP with auth off: a gateway tool gets the brain and no caller', async t => {
+  const gw = await gateway(t, { auth: false });
+  const client = new Client({ name: 'test', version: '0' });
+  await client.connect(new StreamableHTTPClientTransport(gw.url('/mcp/team')));
+  t.after(() => client.close().catch(() => {}));
+  const result = await client.callTool({ name: 'brain_health', arguments: {} });
+  assert.ok(!result.isError);
+  assert.deepEqual(gw.seenContexts, [{ brain: 'team' }]);
 });
 
 test('over MCP: writers and readers neither see nor may call brain_health; refusals are audited as denied', async t => {
@@ -270,7 +312,25 @@ test('GET /admin/brains/<slug>/health: admin only, authenticated against the bra
   const bad = await get('/admin/brains/team/health?sampleSize=-3');
   assert.equal(bad.status, 400);
   assert.deepEqual(await bad.json(), { error: 'invalid_request' });
-  assert.deepEqual(gw.audit(), [], 'the admin endpoint is not a tool call');
+  // Every authenticated read is audited as admin.brain_health (401s have no actor and are not).
+  assert.deepEqual(gw.auditRows().map(row => [row.action, row.actorLogin, row.brain, row.outcome]), [
+    ['admin.brain_health', 'olive', 'team', 'denied'],
+    ['admin.brain_health', 'FullFran', 'team', 'ok'],
+    ['admin.brain_health', 'FullFran', 'ghost', 'error'],
+    ['admin.brain_health', 'FullFran', 'default', 'error'],
+    ['admin.brain_health', 'FullFran', 'team', 'error'],
+  ]);
+});
+
+test('GET /admin/brains/<slug>/health answers 503 busy when the brain database stays locked', async t => {
+  const gw = await gateway(t);
+  const { DatabaseSync } = await import('node:sqlite');
+  const locker = new DatabaseSync(join(gw.dataDirs.team, 'engram.db'));
+  locker.exec('BEGIN EXCLUSIVE');
+  t.after(() => { locker.exec('ROLLBACK'); locker.close(); });
+  const response = await fetch(gw.url('/admin/brains/team/health'), { headers: { authorization: 'Bearer t' } });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'busy' });
 });
 
 test('GET /admin/brains/<slug>/health with auth off (loopback) is open, like /mcp', async t => {

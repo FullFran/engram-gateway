@@ -32,7 +32,9 @@ export interface BrainAccess {
 export interface AdminApi {
   isAdmin(login: string): boolean;
   /** The health report (#18) of brain `slug`; `rawOptions` is the query string. */
-  brainHealth(slug: string, rawOptions: unknown): { ok: true; report: unknown } | { ok: false; reason: 'unknown_brain' | 'no_data' | 'invalid_arguments'; message: string };
+  /** Records an authenticated admin read (the audit log); `login` is null with auth off. */
+  recordAccess?(access: { login: string | null; brain: string; outcome: 'ok' | 'error' | 'denied' }): void;
+  brainHealth(slug: string, rawOptions: unknown): { ok: true; report: unknown } | { ok: false; reason: 'unknown_brain' | 'no_data' | 'invalid_arguments' | 'busy'; message: string };
 }
 
 export interface GatewayAppOptions {
@@ -53,7 +55,7 @@ export interface GatewayAppOptions {
   logger: Logger;
 }
 
-const ADMIN_LOOKUP_STATUS = { unknown_brain: [404, 'not_found'], no_data: [404, 'no_data'], invalid_arguments: [400, 'invalid_request'] } as const;
+const ADMIN_LOOKUP_STATUS = { unknown_brain: [404, 'not_found'], no_data: [404, 'no_data'], invalid_arguments: [400, 'invalid_request'], busy: [503, 'busy'] } as const;
 
 function single(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -148,6 +150,14 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
     app.get('/admin/brains/:slug/health', async (req, res, next) => {
       res.setHeader('Cache-Control', 'no-store');
       const slug = req.params.slug!;
+      let login: string | null = null;
+      const record = (outcome: 'ok' | 'error' | 'denied') => {
+        try {
+          admin.recordAccess?.({ login, brain: slug, outcome });
+        } catch (error) {
+          logger.error('Audit log write failed for an admin read', { path: req.path, reason: (error as Error).message });
+        }
+      };
       if (auth) {
         try {
           await auth.authenticator.prepare(credentialHeaders(req));
@@ -160,13 +170,16 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
           res.status(result.status).json({ error: result.error });
           return;
         }
-        if (!admin.isAdmin(result.principal.login)) {
-          logger.warn('Admin request from a non-admin', { path: req.path, login: result.principal.login });
+        login = result.principal.login;
+        if (!admin.isAdmin(login)) {
+          record('denied');
+          logger.warn('Admin request from a non-admin', { path: req.path, login });
           res.status(403).json({ error: 'forbidden' });
           return;
         }
       }
       const lookup = admin.brainHealth(slug, req.query);
+      record(lookup.ok ? 'ok' : 'error');
       if (lookup.ok) {
         res.status(200).json(lookup.report);
         return;

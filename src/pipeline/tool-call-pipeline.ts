@@ -37,6 +37,8 @@ export interface ToolCallContext {
   caller?: ToolCaller;
   /** The brain (slug) the call was routed to; null when not tied to a brain. */
   brain: string | null;
+  /** The caller's effective role on the brain, set by the authorize stage; absent when auth is off. */
+  role?: string;
   /** Facts for later stages, e.g. `redactions: { github: 1 }`. Never secret values. */
   meta: Record<string, unknown>;
 }
@@ -68,7 +70,8 @@ export type RequestStage = (ctx: ToolCallContext) => ToolCallContext | Promise<T
 export type ResultStage = (ctx: ToolCallContext, result: ToolCallResult) => ToolCallResult | Promise<ToolCallResult>;
 /** Records the call; it sees the outcome but never changes the result. */
 export type AuditStage = (ctx: ToolCallContext, outcome: ToolCallOutcome, call: ToolCallInfo) => void | Promise<void>;
-export type Forward = (request: ToolCallRequest) => Promise<ToolCallResult>;
+/** Sends the (authorized, cleaned) request on; `ctx` says who calls and on which brain. */
+export type Forward = (request: ToolCallRequest, ctx: ToolCallContext) => Promise<ToolCallResult>;
 
 /** Narrows a `tools/list` result to what the caller may call; same access check as `authorize`. */
 export type ToolListStage = <T extends { name: string }>(ctx: ToolListContext, tools: readonly T[]) => T[];
@@ -152,7 +155,7 @@ export async function runToolCall(pipeline: ToolCallPipeline, request: ToolCallR
   ctx = await pipeline.redact(ctx);
   let result: ToolCallResult;
   try {
-    result = await forward(ctx.request);
+    result = await forward(ctx.request, ctx);
   } catch (error) {
     await pipeline.audit(ctx, { ok: false, error }, call);
     throw error;

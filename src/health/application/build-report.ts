@@ -27,6 +27,10 @@ export function buildHealthReport(source: BrainHealthSource, options: HealthRepo
   const sampleSize = clampLimit(options.sampleSize, DEFAULT_SAMPLE_SIZE, MAX_SAMPLE_SIZE);
   const maxTypes = clampLimit(options.maxTypes, DEFAULT_MAX_TYPES, MAX_TYPES);
 
+  return source.snapshot(() => assemble(source, options.now, sampleSize, maxTypes));
+}
+
+function assemble(source: BrainHealthSource, now: Date, sampleSize: number, maxTypes: number): BrainHealthReport {
   const types = source.typeCounts();
   const live = types.reduce((sum, row) => sum + row.count, 0);
   const top = types.slice(0, maxTypes);
@@ -34,13 +38,13 @@ export function buildHealthReport(source: BrainHealthSource, options: HealthRepo
   const noise = source.observationsOfTypes(NOISE_TYPES, sampleSize);
 
   return {
-    generatedAt: options.now.toISOString(),
+    generatedAt: now.toISOString(),
     observations: { live, deleted: source.deletedCount() },
     byType: { top, otherTypes: rest.length, otherCount: rest.reduce((sum, row) => sum + row.count, 0) },
     noise: { types: [...NOISE_TYPES], count: noise.count, share: share(noise.count, live), sampleIds: noise.sampleIds },
     duplicateTitles: source.duplicateTitles(sampleSize),
     pendingRelations: source.pendingRelations(sampleSize),
-    pastReviewAfter: source.pastReviewAfter(engramTimestamp(options.now), sampleSize),
+    pastReviewAfter: source.pastReviewAfter(engramTimestamp(now), sampleSize),
     wiki: { status: 'unavailable', reason: 'requires the curated wiki (#16)' },
     semanticIndex: { status: 'unavailable', reason: 'requires the semantic index (#14)' },
   };

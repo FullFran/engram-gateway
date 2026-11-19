@@ -8,7 +8,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { addObservation, addRelation, createBrainDb } from '../fixtures/engram-brain.mjs';
-import { BrainHealthUnavailableError, MAX_SAMPLE_SIZE, NOISE_TYPES, readBrainHealth } from '../../dist/health/index.js';
+import { DatabaseSync } from 'node:sqlite';
+import { BrainHealthUnavailableError, MAX_SAMPLE_SIZE, NOISE_TYPES, buildHealthReport, createEngramBrainHealthService, openEngramHealthSource, readBrainHealth } from '../../dist/health/index.js';
 
 const NOW = new Date('2026-11-19T10:00:00Z');
 
@@ -217,4 +218,64 @@ test('reads a WAL database after its writer closed (no -wal or -shm files left)'
   assert.ok(!existsSync(join(dir, 'engram.db-wal')));
   const report = readBrainHealth({ dataDir: dir, now: NOW });
   assert.equal(report.observations.live, 11);
+});
+
+test('the adapter reads one consistent snapshot: a commit between two queries is not seen inside it', t => {
+  const { dir, db } = knownBrain(t, { wal: true });
+  t.after(() => db.close());
+  const source = openEngramHealthSource(dir);
+  t.after(() => source.close());
+  const passive = rows => rows.find(row => row.type === 'passive').count;
+  const [before, during] = source.snapshot(() => {
+    const first = passive(source.typeCounts());
+    addObservation(db, { type: 'passive', title: 'committed meanwhile' });
+    return [first, passive(source.typeCounts())];
+  });
+  assert.equal(before, 3);
+  assert.equal(during, 3, 'same snapshot inside the transaction');
+  assert.equal(passive(source.typeCounts()), 4, 'a new read after it sees the commit');
+});
+
+test('buildHealthReport runs every query inside one snapshot', () => {
+  let inside = false;
+  const guard = value => { assert.ok(inside, 'query outside the snapshot'); return value; };
+  const source = {
+    snapshot: work => { inside = true; try { return work(); } finally { inside = false; } },
+    typeCounts: () => guard([{ type: 'passive', count: 2 }]),
+    deletedCount: () => guard(0),
+    observationsOfTypes: () => guard({ count: 2, sampleIds: [1, 2] }),
+    duplicateTitles: () => guard({ groups: 0, rows: 0, excessRows: 0, sampleIds: [] }),
+    pendingRelations: () => guard(null),
+    pastReviewAfter: () => guard({ count: 0, sampleIds: [] }),
+    close: () => {},
+  };
+  const report = buildHealthReport(source, { now: NOW });
+  assert.equal(report.noise.share, 1);
+});
+
+test('a locked database fails fast (busy timeout about 500 ms), it does not stall for 5 s', t => {
+  const { dir, db } = knownBrain(t);
+  db.exec('BEGIN EXCLUSIVE');
+  t.after(() => { db.exec('ROLLBACK'); db.close(); });
+  const started = Date.now();
+  assert.throws(() => readBrainHealth({ dataDir: dir, now: NOW }), /locked|busy/i);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 300 && elapsed < 2000, `gave up after ${elapsed} ms`);
+  const service = createEngramBrainHealthService({ dataDirOf: () => dir, nowMs: () => NOW.getTime() });
+  const lookup = service.report('team');
+  assert.equal(lookup.ok, false);
+  assert.equal(lookup.reason, 'busy');
+  assert.match(lookup.message, /busy/);
+});
+
+test('WAL brain: reading may create -wal/-shm (as engram itself does) but never changes engram.db', t => {
+  const { dir, db } = knownBrain(t, { wal: true });
+  db.close();
+  const path = join(dir, 'engram.db');
+  const before = createHash('sha256').update(readFileSync(path)).digest('hex');
+  readBrainHealth({ dataDir: dir, now: NOW });
+  assert.equal(createHash('sha256').update(readFileSync(path)).digest('hex'), before);
+  const check = new DatabaseSync(path, { readOnly: true });
+  assert.equal(check.prepare('SELECT COUNT(*) AS n FROM observations').get().n, 13);
+  check.close();
 });

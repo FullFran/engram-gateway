@@ -7,11 +7,16 @@ import { BrainHealthUnavailableError, type DuplicateTitlesFinding, type SampledF
 
 const LIVE = 'deleted_at IS NULL';
 
+/** How long a query waits for a lock before failing: short, since node:sqlite blocks the event loop. */
+export const HEALTH_BUSY_TIMEOUT_MS = 500;
+
 /**
  * Opens `<dataDir>/engram.db` read-only through `node:sqlite`, never through
  * the brain's `engram mcp` child, so a report works whether or not the child
- * runs. `readOnly` plus `query_only` make any write fail; WAL databases a
- * running child holds open are read at a consistent snapshot.
+ * runs. `readOnly` plus `query_only` make any write to the database fail. For
+ * a WAL-mode database SQLite may create the `-wal` and `-shm` files when they
+ * are missing (readers need the shared-memory index); engram opens them the
+ * same way, so this is harmless and `engram.db` itself is never changed.
  */
 export function openEngramHealthSource(dataDir: string): BrainHealthSource {
   const path = join(dataDir, 'engram.db');
@@ -20,7 +25,7 @@ export function openEngramHealthSource(dataDir: string): BrainHealthSource {
   try {
     db = new DatabaseSync(path, { readOnly: true });
     db.exec('PRAGMA query_only = ON');
-    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec(`PRAGMA busy_timeout = ${HEALTH_BUSY_TIMEOUT_MS}`);
   } catch (error) {
     throw new BrainHealthUnavailableError(`cannot open ${path} read-only: ${(error as Error).message}`);
   }
@@ -29,6 +34,16 @@ export function openEngramHealthSource(dataDir: string): BrainHealthSource {
 
 class EngramDbSource implements BrainHealthSource {
   constructor(private readonly db: DatabaseSync) {}
+
+  snapshot<T>(work: () => T): T {
+    // A deferred read transaction: every query inside sees the same snapshot.
+    this.db.exec('BEGIN');
+    try {
+      return work();
+    } finally {
+      this.db.exec('COMMIT');
+    }
+  }
 
   private count(sql: string, ...params: SQLInputValue[]): number {
     return Number(this.db.prepare(sql).get(...params)?.n ?? 0);
