@@ -642,6 +642,25 @@ What each operation does:
   grant (from `BRAIN_GRANTS`, or an admin's ownership) is refused with
   `409`; change it in the configuration. Changes apply to the next request.
 
+### Web admin panel
+
+With OAuth on, open `https://<your-gateway>/ui` in a browser. It uses the
+same GitHub sign-in as the consent page (an unsigned visit goes to the
+sign-in and comes back), and only the browser session: an MCP access token
+or a personal access token never opens it. With auth off there is no panel.
+
+| Page | Who | What |
+|------|-----|------|
+| `/ui/tokens` | every signed-in user | Your personal access tokens: create (the secret is shown once), list, revoke |
+
+Every action calls the same application services as the admin and account
+APIs, so authorization, validation and audit are the same. The pages are
+plain HTML forms with no script. Each form POST must come from the
+gateway's own origin (`Origin`, or `Referer`, and `Sec-Fetch-Site`) and
+carry a CSRF token bound to the session; anything else is refused with `403`
+before a service is called. The tokens are derived from a key generated at
+startup, so a form left open across a gateway restart asks to be reloaded.
+
 ### Backups
 
 Set `BACKUP_DIR` to turn on encrypted daily backups. Every run takes one

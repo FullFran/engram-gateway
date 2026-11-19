@@ -27,6 +27,8 @@ export { resolveAuthConfig, AuthConfigError } from './infrastructure/env-config.
 export type { AuthConfig, AuthOnConfig, AuthOffConfig } from './infrastructure/env-config.js';
 export { HttpRequestAuthenticator } from './presentation/http/request-authenticator.js';
 export type { Authentication, Principal, CredentialHeaders, AuthenticateOptions } from './presentation/http/request-authenticator.js';
+export { isSameOrigin, parseCookies } from './presentation/http/http-helpers.js';
+export { escapeHtml } from './presentation/http/pages.js';
 export type { AccessPolicy, Identity, IdentityProvider } from './application/identity.js';
 export type {
   ConnectionAcceptance, ConnectionAnswer, ConnectionConsent, ConnectionOffer, ConsentBrain, ConsentClient
