@@ -9,6 +9,7 @@ export interface NavItem {
 
 /** Pages every signed-in user has: their own connections and tokens. */
 export const ACCOUNT_NAV: readonly NavItem[] = [
+  { path: '/ui/connections', label: 'My connections' },
   { path: '/ui/tokens', label: 'My tokens' }
 ];
 

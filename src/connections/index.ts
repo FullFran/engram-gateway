@@ -15,6 +15,8 @@ export type { ConnectionToolArguments, ParsedConnectionTool } from './domain/con
 export { ConnectionAdmin } from './application/connection-admin.js';
 export type { AttachOutcome, AttachableBrain, ConnectionToolAccess, ConnectionToolCheck, ConnectionView, OwnerGrants } from './application/connection-admin.js';
 export { ConnectionConsentService, NO_ROLE } from './application/connection-consent.js';
+export { OwnConnectionError, OwnConnections } from './application/own-connections.js';
+export type { OwnConnectionActor, OwnConnectionErrorCode, OwnConnectionView, OwnConnectionsDeps } from './application/own-connections.js';
 export { SqliteConnectionStore } from './infrastructure/sqlite-connection-store.js';
 export { MEMORY_SCOPE_FOR_PATS, PAT_LIFETIME_DAYS, PAT_PREFIX, PAT_PROVIDER, PAT_SCOPES, isPatShaped, patStatus, roleOfScope } from './domain/personal-access-token.js';
 export type { PatLifetimeDays, PatScope, PatStatus, PatView } from './domain/personal-access-token.js';

@@ -154,3 +154,28 @@ test('with auth off there is no session, so the panel is not mounted', async t =
   assert.equal(response.status, 404);
   assert.equal(built, false);
 });
+
+test('a provider that names no session cookie gets no panel: nothing to bind the CSRF token to, so it is refused (no fallback)', async t => {
+  const s = uiSetup(t);
+  const { call } = await uiApp(t, s, { sessionCookies: false });
+  const page = await call('/ui/tokens', { as: 'dev' });
+  assert.equal(page.status, 403);
+  assert.match(await page.text(), /cannot be used with this sign-in/);
+  const post = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { name: 'x', brains: 'alpha', scope: 'read', expires: '30' } });
+  assert.equal(post.status, 403);
+  assert.deepEqual(s.pats.list('dev'), []);
+});
+
+test('an oversized or unreadable form body gets the panel\'s error page with 413 / 415, not a 500', async t => {
+  const s = uiSetup(t);
+  const { call, csrfOf } = await uiApp(t, s);
+  const csrf = await csrfOf('dev');
+  const big = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { csrf, name: 'x'.repeat(20_000) } });
+  assert.equal(big.status, 413);
+  assert.match(big.headers.get('content-type'), /text\/html/);
+  assert.match(await big.text(), /<h1>Form too large<\/h1>/);
+  const charset = await call('/ui/tokens', { as: 'dev', method: 'POST', form: { csrf, name: 'x' }, headers: { 'content-type': 'application/x-www-form-urlencoded; charset=klingon' } });
+  assert.equal(charset.status, 415);
+  assert.match(await charset.text(), /<h1>Form not readable<\/h1>/);
+  assert.deepEqual(s.pats.list('dev'), []);
+});

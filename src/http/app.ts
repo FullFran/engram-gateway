@@ -148,7 +148,8 @@ export function createGatewayApp(options: GatewayAppOptions): express.Express {
     const cookies = parseCookies(single(req.headers.cookie));
     const names = auth!.authenticator.sessionCookieNames(single(req.headers.cookie)).sort();
     const binding = names.map(name => `${name}=${cookies.get(name) ?? ''}`).join(';');
-    return { login, binding: binding || `login:${login}` };
+    // No session cookie to bind to (a provider that names none): no binding, and the panel refuses.
+    return { login, binding: binding === '' ? null : binding };
   };
   if (auth && options.ui) app.use(UI_PATH, options.ui(identifySession));
 

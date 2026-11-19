@@ -2,11 +2,12 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { isSameOrigin } from '../../../auth/index.js';
 import type { Role } from '../../../authz/index.js';
-import { PatError, patJson } from '../../../connections/index.js';
-import type { PersonalAccessTokens } from '../../../connections/index.js';
+import { OwnConnectionError, PatError, patJson } from '../../../connections/index.js';
+import type { OwnConnections, PersonalAccessTokens } from '../../../connections/index.js';
 import type { Logger } from '../../../shared/logger.js';
 import { CsrfTokens } from './csrf.js';
 import { renderBarePage, renderPage, securityHeaders } from './layout.js';
+import { connectionsContent } from './views/connections.js';
 import { tokensContent } from './views/tokens.js';
 import type { TokensView } from './views/tokens.js';
 
@@ -16,8 +17,12 @@ export const UI_PATH = '/ui';
 /** The signed-in user of a request, from the browser session only. */
 export interface UiSession {
   login: string;
-  /** What the session's CSRF token is bound to: the session cookie itself. */
-  binding: string;
+  /**
+   * What the session's CSRF token is bound to: the session cookie itself.
+   * Null when the sign-in names no session cookie: the panel is refused then,
+   * never bound to something stable such as the login.
+   */
+  binding: string | null;
 }
 
 export type UiIdentify = (req: Request) => Promise<UiSession | undefined>;
@@ -28,6 +33,7 @@ export interface UiRouterOptions {
   origin: string;
   isAdmin(login: string): boolean;
   tokens: PersonalAccessTokens;
+  connections: OwnConnections;
   /** The user's grants: the brains a token of theirs may use. */
   brainsOf(login: string): { brain: string; role: Role }[];
   clock: { nowMs(): number };
@@ -39,7 +45,7 @@ export interface UiRouterOptions {
 const STATUS = { invalid: 400, not_found: 404, conflict: 409 } as const;
 
 interface Context {
-  session: UiSession;
+  session: { login: string; binding: string };
   csrf: string;
   isAdmin: boolean;
 }
@@ -89,7 +95,13 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
       res.status(401).type('html').send(renderBarePage('Signed out', 'Your session has ended. Sign in again, then repeat the action.', { href: '/oauth/login?return_to=%2Fui', label: 'Sign in' }));
       return;
     }
-    const context: Context = { session, csrf: csrfTokens.issue(session.binding), isAdmin: options.isAdmin(session.login) };
+    if (session.binding === null) {
+      logger.warn('Panel refused: the sign-in names no session cookie', { login: session.login });
+      res.status(403).type('html').send(renderBarePage('Panel unavailable', 'The panel cannot be used with this sign-in: it has no browser session to bind its forms to.'));
+      return;
+    }
+    const bound = { login: session.login, binding: session.binding };
+    const context: Context = { session: bound, csrf: csrfTokens.issue(bound.binding), isAdmin: options.isAdmin(bound.login) };
     res.locals[CONTEXT] = context;
     next();
   });
@@ -168,12 +180,49 @@ export function createUiRouter(options: UiRouterOptions): express.Router {
     }
   });
 
+  // ---- My connections (#27) ----
+  const sendConnections = (res: Response, status: number, error?: string) => {
+    const { session, csrf } = ctx(res);
+    send(res, status, 'My connections', '/ui/connections', connectionsContent({ csrf, connections: options.connections.list(session.login), ...(error ? { error } : {}) }));
+  };
+  const connectionChange = (change: (actor: { kind: 'user'; login: string }, id: number, body: Record<string, unknown>) => void) =>
+    (req: Request, res: Response) => {
+      const id = /^\d{1,15}$/.test(req.params.id ?? '') ? Number(req.params.id) : NaN;
+      try {
+        change({ kind: 'user', login: ctx(res).session.login }, id, (req.body ?? {}) as Record<string, unknown>);
+        res.redirect(303, '/ui/connections');
+      } catch (error) {
+        if (!(error instanceof OwnConnectionError)) throw error;
+        sendConnections(res, STATUS[error.code], error.message);
+      }
+    };
+
+  router.get('/connections', (_req, res) => sendConnections(res, 200));
+  router.post('/connections/:id/attach', connectionChange((actor, id, body) =>
+    options.connections.attach(actor, id, text(body.brain), body.role, body.default === 'on')));
+  router.post('/connections/:id/detach', connectionChange((actor, id, body) =>
+    options.connections.detach(actor, id, text(body.brain))));
+
   router.use((_req, res) => {
     send(res, 404, 'Page not found', '', '<h1>Page not found</h1><p><a href="/ui">Back to the panel</a></p>');
   });
 
-  router.use((error: Error, req: Request, res: Response, next: NextFunction) => {
+  // A form body the parser refuses (too large, too many fields, unknown charset): the client's fault, said on a page.
+  const BODY_ERRORS: Record<string, { status: number; title: string; message: string }> = {
+    'entity.too.large': { status: 413, title: 'Form too large', message: 'This form sent more data than the panel accepts.' },
+    'parameters.too.many': { status: 413, title: 'Form too large', message: 'This form sent more fields than the panel accepts.' },
+    'charset.unsupported': { status: 415, title: 'Form not readable', message: 'This form was sent in an encoding the panel does not read.' },
+    'encoding.unsupported': { status: 415, title: 'Form not readable', message: 'This form was sent in an encoding the panel does not read.' },
+    'entity.parse.failed': { status: 400, title: 'Form not readable', message: 'This form could not be read.' },
+    'request.aborted': { status: 400, title: 'Form not readable', message: 'This form arrived incomplete.' }
+  };
+  router.use((error: Error & { type?: string }, req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) return next(error);
+    const body = error.type !== undefined ? BODY_ERRORS[error.type] : undefined;
+    if (body) {
+      res.status(body.status).type('html').send(renderBarePage(body.title, `${body.message} Reload the page and try again.`, { href: '/ui', label: 'Back to the panel' }));
+      return;
+    }
     logger.error('Panel request failed', { path: req.path, message: error.message });
     res.status(500).type('html').send(renderBarePage('Something went wrong', 'The gateway could not complete this request. Try again later.', { href: '/ui', label: 'Back to the panel' }));
   });

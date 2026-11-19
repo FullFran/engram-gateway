@@ -1,6 +1,8 @@
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import { isRole } from '../../authz/domain/role.js';
 import type { Role } from '../../authz/domain/role.js';
+import type { AuditEvent } from '../../audit/domain/audit-event.js';
+import { insertAuditEvent } from '../../audit/infrastructure/sqlite-audit-log.js';
 import { immediateTransaction } from '../../shared/sqlite-database.js';
 import { ConnectionNameTakenError } from '../application/ports.js';
 import type { ConnectionStore } from '../application/ports.js';
@@ -63,7 +65,11 @@ export class SqliteConnectionStore implements ConnectionStore {
     });
   }
 
-  attach(connectionId: number, brain: string, role: Role, makeDefault: boolean): void {
+  listOwned(login: string): Connection[] {
+    return this.db.prepare(`${SELECT_CONNECTION} WHERE u.github_login = ? ORDER BY c.id`).all(login).map(row => this.connection(row));
+  }
+
+  attach(connectionId: number, brain: string, role: Role, makeDefault: boolean, audit?: AuditEvent): void {
     immediateTransaction(this.db, () => {
       const changes = this.db.prepare(
         `INSERT INTO connection_brains (connection_id, brain_id, role) SELECT ?, id, ? FROM brains WHERE slug = ?
@@ -73,17 +79,20 @@ export class SqliteConnectionStore implements ConnectionStore {
       if (makeDefault) {
         this.db.prepare('UPDATE connections SET default_brain_id = (SELECT id FROM brains WHERE slug = ?) WHERE id = ?').run(brain, connectionId);
       }
+      if (audit) insertAuditEvent(this.db, audit);
     });
   }
 
-  detach(connectionId: number, brain: string): boolean {
+  detach(connectionId: number, brain: string, audit?: AuditEvent): boolean {
     return immediateTransaction(this.db, () => {
       const changes = this.db.prepare(
         'DELETE FROM connection_brains WHERE connection_id = ? AND brain_id = (SELECT id FROM brains WHERE slug = ?)'
       ).run(connectionId, brain).changes;
       this.db.prepare('UPDATE connections SET default_brain_id = NULL WHERE id = ? AND default_brain_id = (SELECT id FROM brains WHERE slug = ?)')
         .run(connectionId, brain);
-      return Number(changes) === 1;
+      const detached = Number(changes) === 1;
+      if (detached && audit) insertAuditEvent(this.db, audit);
+      return detached;
     });
   }
 
