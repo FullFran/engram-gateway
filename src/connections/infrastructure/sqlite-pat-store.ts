@@ -44,6 +44,12 @@ export class SqlitePatStore implements PatStore {
   constructor(private readonly db: DatabaseSync, private readonly connections: SqliteConnectionStore) {}
 
   create(login: string, choice: ConnectionChoice, pat: NewPat, audit: (patId: number) => AuditEvent): PatView {
+    // An expired token frees its name for the new one (a revoked one freed it when revoked).
+    this.db.prepare(
+      `UPDATE connections SET name = name || ' (expired ' || (SELECT p.id FROM personal_access_tokens p WHERE p.connection_id = connections.id) || ')'
+       WHERE name = ? AND user_id = (SELECT id FROM users WHERE github_login = ?)
+         AND id IN (SELECT connection_id FROM personal_access_tokens WHERE revoked_at IS NULL AND expires_at <= ?)`
+    ).run(choice.name, login, pat.createdAt);
     let id = 0;
     this.connections.createToken(login, choice, connectionId => {
       id = Number(this.db.prepare(
@@ -71,6 +77,11 @@ export class SqlitePatStore implements PatStore {
            AND connection_id IN (SELECT c.id FROM connections c JOIN users u ON u.id = c.user_id WHERE u.github_login = ?)`
       ).run(atS, id, login).changes;
       if (Number(changes) !== 1) return false;
+      // Frees the name: the owner may give it to a new token.
+      this.db.prepare(
+        `UPDATE connections SET name = name || ' (revoked ' || ? || ')'
+         WHERE id = (SELECT connection_id FROM personal_access_tokens WHERE id = ?)`
+      ).run(String(id), id);
       insertAuditEvent(this.db, audit);
       return true;
     });

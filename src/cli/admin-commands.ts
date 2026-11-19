@@ -200,7 +200,7 @@ export async function runAdminCli(argv: readonly string[], env: Env, io: CliIo):
       case 'tokens revoke': {
         if (!/^\d{1,15}$/.test(args[1]!)) throw new PatError('not_found', `no token ${JSON.stringify(args[1])}`);
         const pat = pats().revoke(actor, args[0]!, Number(args[1]));
-        io.print(`revoked token ${pat.id} (${pat.name}) of ${args[0]}`);
+        io.print(`revoked token ${pat.id} of ${args[0]}; its name is now ${JSON.stringify(pat.name)}`);
         break;
       }
     }

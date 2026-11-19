@@ -112,6 +112,28 @@ test('create refuses, writing nothing: bad scope or lifetime, no brains, a brain
   assert.equal(count(), before);
 });
 
+test('a revoked or expired token frees its name: the old one is renamed "<name> (revoked|expired <id>)", a new token may take the name', t => {
+  const s = setup(t);
+  const first = s.create('dev', { name: 'deploy' });
+  s.pats.revoke({ kind: 'user', login: 'dev' }, 'dev', first.pat.id);
+  assert.equal(s.pats.list('dev')[0].name, `deploy (revoked ${first.pat.id})`);
+  const second = s.create('dev', { name: 'deploy', expiresInDays: 30 });
+  assert.equal(second.pat.name, 'deploy');
+  // An active token still holds its name.
+  assert.throws(() => s.create('dev', { name: 'deploy' }), error => error.code === 'conflict');
+  // Expired: freed by the next creation that wants the name.
+  s.clock.ms += 31 * DAY_MS;
+  const third = s.create('dev', { name: 'deploy', expiresInDays: 90 });
+  assert.equal(third.pat.name, 'deploy');
+  assert.deepEqual(s.pats.list('dev').map(pat => pat.name),
+    ['deploy', `deploy (expired ${second.pat.id})`, `deploy (revoked ${first.pat.id})`]);
+  // The old secrets stay refused; another user's name is untouched.
+  assert.deepEqual(s.pats.authenticate(first.token), { kind: 'invalid', reason: 'revoked' });
+  assert.deepEqual(s.pats.authenticate(second.token), { kind: 'invalid', reason: 'expired' });
+  s.create('other', { name: 'deploy', expiresInDays: 30 });
+  assert.equal(s.pats.list('other')[0].name, 'deploy');
+});
+
 test('authenticate: not a PAT is none; an unknown PAT is invalid (not audited); last_used is written at most once a minute', t => {
   const s = setup(t);
   assert.deepEqual(s.pats.authenticate('gho_abc'), { kind: 'none' });
@@ -307,7 +329,7 @@ test('admin CLI: tokens create prints the secret once, list shows status and no 
   assert.match(err.at(-1), /reader on brain beta/);
   assert.equal(await run(['tokens', 'create', 'dev', '--name', 'w', '--brains', 'alpha', '--scope', 'read', '--expires', '45']), 1);
   assert.equal(await run(['tokens', 'revoke', 'dev', id]), 0);
-  assert.match(out.at(-1), new RegExp(`^revoked token ${id} \\(ci\\) of dev$`));
+  assert.match(out.at(-1), new RegExp(`^revoked token ${id} of dev; its name is now "ci \\(revoked ${id}\\)"$`));
   assert.equal(await run(['tokens', 'revoke', 'dev', id]), 1);
   assert.equal(await run(['tokens', 'revoke', 'dev', 'abc']), 1);
   const rows = [...new SqliteAuditLog(s.db).read()].filter(row => row.action.startsWith('pat.'));

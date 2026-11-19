@@ -384,7 +384,10 @@ brains.
   `reader`) and an expiry of 30, 90 or 365 days. The first brain is the
   default one. The secret (`egw_pat_` + 256 random bits) is shown once;
   the gateway keeps its SHA-256 only (`personal_access_tokens.hash`). Names
-  are unique per user, across all their connections and revoked tokens.
+  are unique per user, across all their connections. Revoking a token
+  renames it `<name> (revoked <id>)`, and creating a token with the name of
+  an expired one renames that one `<name> (expired <id>)`, so the name can
+  be reused.
 - **Effective role.** The weaker of the owner's grant (read on every call)
   and the token's role: a `read` PAT of a writer cannot write. Revoking the
   owner's grant, or disabling the owner, blocks the token on the next
