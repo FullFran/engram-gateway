@@ -43,6 +43,10 @@ connection tools (#12, #27) build on the same mechanism.
   in both tool sets: a brain tool on `/mcp/<brain>`, and a connection tool
   (`CONNECTION_TOOL_KINDS`, no `brain` argument) on `/mcp`, where the
   connection server lists it once.
+- **Wiki tools (#16):** `src/gateway-tools/tools/wiki-tools.ts`, thin
+  adapters over the `WikiService` use cases (`src/wiki`), which check the
+  role again so other entry points (the review UI, #17) share the rule. See
+  [wiki.md](wiki.md).
 - **Connection tools (#27):** `brain_list`, `connection_brains`,
   `connection_attach` and `connection_detach` (`src/gateway-tools/tools/connection-tools.ts`)
   are a second tool set served only by the connection server. They act on the

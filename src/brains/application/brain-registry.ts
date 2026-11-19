@@ -69,6 +69,11 @@ export class BrainRegistry<P extends BrainProcess> {
     return this.options.brains.get(slug) !== undefined;
   }
 
+  /** True while `quiesce` holds the brain (a restore is swapping its files). */
+  isQuiesced(slug: string): boolean {
+    return this.held.has(slug);
+  }
+
   /** One brain's child: `live` while it runs (or is closing), `idle` when it serves no request. */
   status(slug: string): { live: boolean; idle: boolean } {
     if (this.closing.has(slug)) return { live: true, idle: true };

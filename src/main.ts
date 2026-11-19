@@ -31,7 +31,8 @@ import { BrainRegistry, DEFAULT_BRAIN, SqliteBrainRepository, bootstrapBrains, b
 import { createConnectionServer, createEngramBridge } from './bridge/index.js';
 import { ConnectionAdmin, ConnectionConsentService, SqliteConnectionStore } from './connections/index.js';
 import { resolveGatewayConfig, resolveGatewayDbPath } from './config.js';
-import { BRAIN_RESOLVE_TOOL, createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet } from './gateway-tools/index.js';
+import { BRAIN_RESOLVE_TOOL, createBrainHealthTool, createBrainResolveTool, createConnectionTools, createGatewayToolSet, createWikiTools } from './gateway-tools/index.js';
+import { createSqliteWikiService } from './wiki/index.js';
 import { createEngramBrainHealthService } from './health/index.js';
 import { MCP_HTTP_PATH } from './http/mcp-route.js';
 import { createGatewayApp } from './http/app.js';
@@ -123,7 +124,14 @@ async function main(): Promise<void> {
   const brainResolve = createBrainResolveTool({ rules: config.brainRemotes, connections: connectionAdmin });
   const { [BRAIN_RESOLVE_TOOL]: _shared, ...brainOnlyGatewayRoles } = GATEWAY_TOOL_ROLES;
   const connectionTools = createGatewayToolSet([...createConnectionTools(connectionAdmin), brainResolve], { engram: { ...TOOL_ROLES, ...brainOnlyGatewayRoles }, gateway: CONNECTION_TOOL_KINDS });
-  const gatewayTools = createGatewayToolSet([createBrainHealthTool(health), brainResolve], { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES });
+  // Wiki (#16): each brain's wiki.db next to its engram.db. The data directory
+  // is read per call (brains created later are served), and calls are refused
+  // while a restore holds the brain, so a decision never races a file swap.
+  const wiki = createSqliteWikiService({
+    dataDirOf: slug => brainRepo.findActive(slug)?.dataDir,
+    isQuiesced: slug => registry.isQuiesced(slug)
+  });
+  const gatewayTools = createGatewayToolSet([createBrainHealthTool(health), brainResolve, ...createWikiTools(wiki)], { engram: TOOL_ROLES, gateway: GATEWAY_TOOL_ROLES });
 
   const command = process.env.ENGRAM_BIN?.trim() || 'engram';
   const args = (process.env.ENGRAM_ARGS?.trim() || 'mcp').split(/\s+/);

@@ -14,3 +14,4 @@ export { matchRemote, normalizeRemote, parseRemoteMapping } from './application/
 export type { RemoteRule } from './application/remote-mapping.js';
 export { CONNECTION_TOOL_NAMES, createConnectionTools } from './tools/connection-tools.js';
 export type { ConnectionAdminPort } from './tools/connection-tools.js';
+export { createWikiTools } from './tools/wiki-tools.js';

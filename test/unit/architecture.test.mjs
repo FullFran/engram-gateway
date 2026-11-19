@@ -119,6 +119,20 @@ test('health reads the brain DB itself: it never imports the bridge, http or aut
   }
 });
 
+test('wiki: domain is pure; the wiki never imports the bridge, http, auth or the MCP packages', () => {
+  const dir = join(src, 'wiki');
+  assert.ok(statSync(dir, { throwIfNoEntry: false })?.isDirectory(), 'src/wiki exists');
+  for (const file of files(dir)) {
+    for (const spec of imports(file)) {
+      const to = target(file, spec);
+      for (const other of ['bridge/', 'http/', 'auth/', 'gateway-tools/', '@modelcontextprotocol/']) assert.ok(!to.startsWith(other), `${relative(src, file)} imports ${spec}`);
+    }
+  }
+  for (const file of files(join(dir, 'domain'))) {
+    for (const spec of imports(file)) assert.ok(target(file, spec).startsWith('wiki/domain/'), `${relative(src, file)} imports ${spec}`);
+  }
+});
+
 test('gateway-tools never imports http, auth or the MCP packages; its domain is pure', () => {
   const dir = join(src, 'gateway-tools');
   for (const file of files(dir)) {
